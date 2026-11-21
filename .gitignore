@@ -1,0 +1,52 @@
+**/.env
+**/.env.*
+!**/.env.example
+.venv/
+.run/
+**/node_modules/
+**/__pycache__/
+
+# Local runtime, credentials, generated output
+**/dist/
+**/coverage/
+**/.pytest_cache/
+**/.eslintcache
+**/.idea/
+**/.vscode/
+*.py[cod]
+*.log
+*.sqlite3
+*.sqlite3-*
+*.sql
+*.pem
+*.key
+*service-account*.json
+credentials.json
+**/.django-dev-secret
+.DS_Store
+Thumbs.db
+
+# Uploads and evidence may contain personal or business information
+/code/system/media/
+/code/system/avatars/
+/code/system/quality/
+
+# Local models, datasets, training outputs and installers
+*.pt
+*.onnx
+*.whl
+*.exe
+*.zip
+/code/system/recommend_model.txt
+/code/ai_woorkspace/my_dataset/
+/code/ai_woorkspace/
+/code/ai_woorkspace/yolov5/runs/
+/code/ai_woorkspace/yolov5/.git/
+/code/ai_woorkspace/yolov5/data/images/
+
+# Historical one-off scripts and private payment images
+/code/system/test/
+/code/Agricultural-product-system/refactor_frontemd.py
+/code/Agricultural-product-system/src/assets/alipay_qr.png
+/code/Agricultural-product-system/src/assets/wechat_qr.png
+/code/Agricultural-product-system/src/assets/unionpay_logo.png

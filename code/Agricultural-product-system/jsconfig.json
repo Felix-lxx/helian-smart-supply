@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    // "baseUrl": ".",
+    "allowJs": true,
+    "checkJs": false,
+    "types": ["vite/client"],
+    "paths": {
+      // "@/*": ["src/*"]
+    }
+  },
+  "include": ["src/**/*.js", "src/**/*.vue", "src/**/*.ts", "src/**/*.d.ts", "vite.config.js"],
+  "exclude": ["node_modules", "dist"]
+}

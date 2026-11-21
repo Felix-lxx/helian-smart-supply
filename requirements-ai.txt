@@ -1,0 +1,17 @@
+# Optional CPU/GPU image inference and historical training tools.
+# Select the appropriate torch/torchvision wheels for your device if needed.
+-r requirements.txt
+torch==2.9.0
+torchvision==0.24.0
+opencv-python>=4.10,<5
+pandas==2.2.2
+matplotlib==3.10.6
+seaborn==0.13.2
+ultralytics==8.3.227
+GitPython>=3.1.30,<4
+PyYAML>=6.0,<7
+psutil>=5.9,<8
+tqdm>=4.66.3,<5
+lightgbm==4.6.0
+# Optional Earth Engine integration, with separate credentials:
+# pip install earthengine-api
