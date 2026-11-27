@@ -15,7 +15,18 @@ from .access import supplier_ids
 
 
 def remaining_demand(d):
+    if d.required_usable:
+        # The gross amount on a net-use demand is a planning reference, not a cap.
+        return (remaining_usable(d)*d.quantity/d.required_usable).quantize(Decimal('.01'))
     return max(Decimal(0), d.quantity-sum(q.quantity-q.released_quantity for q in d.quotes.filter(status='accepted').exclude(order__status='cancelled')))
+
+
+def remaining_usable(d):
+    if not d.required_usable:
+        return None
+    covered = sum((q.quantity-q.released_quantity)*Decimal(str(q.terms.get('yield_rate', 0)))
+        for q in d.quotes.filter(status='accepted').exclude(order__status='cancelled'))
+    return max(Decimal(0), d.required_usable-covered)
 
 
 def solve_options(options, batch_caps, demand_caps, strategy='cost'):
@@ -25,41 +36,53 @@ def solve_options(options, batch_caps, demand_caps, strategy='cost'):
     from scipy.sparse import lil_matrix
     if not options: return [], {'solver': 'empty', 'optimal': True}
     m=len(options)
+    demand_keys=list(demand_caps)
+    demand_index={key:i for i,key in enumerate(demand_keys)}
+    vcount=2*m+len(demand_keys)
     batch_rows={bid:i for i,bid in enumerate(batch_caps)}
     demand_rows={did:i+len(batch_rows) for i,did in enumerate(demand_caps)}
     pairs=sorted({(x['batch_id'],x['demand_id']) for x in options})
     pair_rows={pair:i+len(batch_rows)+len(demand_rows) for i,pair in enumerate(pairs)}
     offset=len(batch_rows)+len(demand_rows)+len(pair_rows)
-    matrix=lil_matrix((offset+2*m,2*m),dtype=float)
-    lower=np.full(offset+2*m,-np.inf);upper=np.zeros(offset+2*m)
+    matrix=lil_matrix((offset+2*m+len(demand_keys),vcount),dtype=float)
+    lower=np.full(offset+2*m+len(demand_keys),-np.inf);upper=np.zeros(offset+2*m+len(demand_keys))
     for bid,idx in batch_rows.items():upper[idx]=batch_caps[bid]
-    for did,idx in demand_rows.items():upper[idx]=demand_caps[did]
+    for did,idx in demand_rows.items():
+        related=[x for x in options if x['demand_id']==did and x.get('net_demand')]
+        allowance=max((max(x['step']*x.get('yield_rate',1), x['minimum']*x['step']*x.get('yield_rate',1)-demand_caps[did]) for x in related),default=0)
+        upper[idx]=demand_caps[did]+max(0,allowance)
     for pair,idx in pair_rows.items():upper[idx]=1
     for i,x in enumerate(options):
         matrix[batch_rows[x['batch_id']],i]=x['step']
-        matrix[demand_rows[x['demand_id']],i]=x['step']
+        effective=x['step']*x.get('yield_rate',1)
+        matrix[demand_rows[x['demand_id']],i]=effective
+        matrix[offset+2*m+demand_index[x['demand_id']],i]=-effective
         matrix[pair_rows[(x['batch_id'],x['demand_id'])],m+i]=1
         matrix[offset+2*i,i]=1;matrix[offset+2*i,m+i]=-x['maximum']
         matrix[offset+2*i+1,i]=-1;matrix[offset+2*i+1,m+i]=x['minimum']
+    for did,index in demand_index.items():
+        matrix[offset+2*m+index,2*m+index]=1
     constraint = LinearConstraint(matrix.tocsr(), lower, upper)
-    bounds = Bounds(np.zeros(m*2), np.array([x['maximum'] for x in options]+[1]*m))
-    coverage = np.array([x['step']*x.get('priority',1)/max(demand_caps[x['demand_id']],.01) for x in options]+[0]*m)
-    first = milp(-coverage, integrality=np.ones(m*2), bounds=bounds, constraints=constraint,
+    bounds = Bounds(np.zeros(vcount), np.array([x['maximum'] for x in options]+[1]*m+[demand_caps[k] for k in demand_keys]))
+    priorities={k:max((x.get('priority',1) for x in options if x['demand_id']==k),default=1) for k in demand_keys}
+    coverage = np.array([0.]*(2*m)+[priorities[k]/max(demand_caps[k],.01) for k in demand_keys])
+    integral=np.array([1]*(2*m)+[0]*len(demand_keys))
+    first = milp(-coverage, integrality=integral, bounds=bounds, constraints=constraint,
                  options={'time_limit': 6, 'mip_rel_gap': .001})
     if first.x is None: raise ValidationError('约束求解未完成，请减少候选范围后重试')
-    monetary=np.array([x['unit_price']*x['step'] for x in options]+[x.get('fixed_cost',0) for x in options])
-    if strategy=='stable':objective=np.array([0.]*m+[(m+1)*x.get('change_cost',1)+1 for x in options])
-    elif strategy=='fast':objective=np.array([x.get('delivery_days',0)*x['step'] for x in options]+[0.]*m)
+    monetary=np.array([x['unit_price']*x['step'] for x in options]+[x.get('fixed_cost',0) for x in options]+[0.]*len(demand_keys))
+    if strategy=='stable':objective=np.array([0.]*m+[(m+1)*x.get('change_cost',1)+1 for x in options]+[0.]*len(demand_keys))
+    elif strategy=='fast':objective=np.array([x.get('arrival_days',x.get('delivery_days',0))*x['step'] for x in options]+[0.]*(m+len(demand_keys)))
     else:objective=monetary
     best = float(coverage@first.x)
-    second = milp(np.array(objective), integrality=np.ones(m*2), bounds=bounds,
+    second = milp(np.array(objective), integrality=integral, bounds=bounds,
         constraints=[constraint, LinearConstraint(coverage, best-1e-7, np.inf)],
         options={'time_limit': 6, 'mip_rel_gap': .001})
     result = second if second.x is not None else first
     all_optimal=bool(first.success and second.success)
     if strategy in ['stable','fast'] and second.x is not None:
         change_best=float(objective@second.x)
-        third=milp(monetary,integrality=np.ones(m*2),bounds=bounds,
+        third=milp(monetary,integrality=integral,bounds=bounds,
             constraints=[constraint,LinearConstraint(coverage,best-1e-7,np.inf),
                          LinearConstraint(objective,-np.inf,change_best+1e-7)],
             options={'time_limit':6,'mip_rel_gap':.001})
@@ -76,10 +99,19 @@ def solve_options(options, batch_caps, demand_caps, strategy='cost'):
 def options_for(b, d, cap, required, override=None, original=False):
     p = b.product; step = float(p.quantity_step)
     if step <= 0: return []
-    tiers = [(float(p.min_order), float(p.retail_price))]
-    tiers.extend((float(t.min_quantity), float(t.wholesale_price)) for t in p.price_tiers.order_by('min_quantity'))
+    tiers = [(float(p.min_order), float(b.sale_price if b.sale_price is not None else p.retail_price))]
+    if b.sale_price is None:
+        tiers.extend((float(t.min_quantity), float(t.wholesale_price)) for t in p.price_tiers.order_by('min_quantity'))
     tiers = sorted(dict(tiers).items())
     if override is not None: tiers = [(float(p.min_order), float(override))]
+    rate=1.
+    net=bool(getattr(d,'required_usable',None))
+    if net:
+        from .coordination import yield_data
+        evidence=yield_data(b,d.purpose,getattr(d,'process',''))
+        if not evidence or evidence['rate']<=0:return []
+        rate=evidence['rate']
+        required=max(float(p.min_order), math.ceil(required/rate/step)*step)
     rows = []
     for i,(start,unit) in enumerate(tiers):
         lo = max(float(p.min_order),start)
@@ -88,7 +120,8 @@ def options_for(b, d, cap, required, override=None, original=False):
         if maximum < minimum: continue
         rows.append({'batch_id':b.id,'demand_id':d.id,'step':step,'minimum':minimum,'maximum':maximum,
             'unit_price':unit+float(p.packaging_fee),'goods_price':unit,'fixed_cost':float(p.freight_fee),
-            'delivery_days':p.delivery_days,'change_cost':0 if original else 1,'priority':getattr(d,'priority',1)})
+            'delivery_days':p.delivery_days,'arrival_days':max(0,((b.available_date or timezone.localdate())-timezone.localdate()).days)+p.delivery_days,
+            'change_cost':0 if original else 1,'priority':getattr(d,'priority',1), 'yield_rate':rate,'net_demand':net})
     return rows
 
 
@@ -100,7 +133,7 @@ def compute(user, data):
     if user.role == 'supplier': qs=qs.filter(product__owner_id__in=supplier_ids(user,'manage'))
     batches=list(qs.order_by('id')[:100])
     demands=list(PurchaseDemand.objects.filter(status='open',deadline__gte=timezone.localdate()).select_related('buyer').order_by('-priority','deadline','id')[:100])
-    needs={d.id:remaining_demand(d) for d in demands}; robust=data.get('mode')=='robust'
+    needs={d.id:remaining_usable(d) if d.required_usable else remaining_demand(d) for d in demands}; robust=data.get('mode')=='robust'
     caps={b.id:float(max(Decimal(0),b.quantity-b.reserved)) if b.status=='released' else 0 for b in batches}
     overrides=data.get('capacities',{})
     if not isinstance(overrides,dict): raise ValidationError('库存场景格式错误')
@@ -127,15 +160,17 @@ def compute(user, data):
         certificates.append(cert)
         for x in selected:
             b,d=by_batch[x['batch_id']],by_demand[x['demand_id']]
-            cost=price_for(b.product,Decimal(str(x['quantity'])))
+            cost=price_for(b.product,Decimal(str(x['quantity'])),batch=b)
             allocations.append({'batch_id':b.id,'batch_code':b.code,'product':b.product.name,'demand_id':d.id,
                 'demand':d.title,'buyer':d.buyer.username,'quantity':x['quantity'],'unit':unit,
-                'price':float(cost['unit_price']),'amount':float(cost['total']),'pricing':json_price(cost)})
+                'price':float(cost['unit_price']),'amount':float(cost['total']),'pricing':json_price(cost),
+                'usable_quantity':round(x['quantity']*x.get('yield_rate',1),2) if d.required_usable else None,
+                'yield_rate':x.get('yield_rate',1)})
     shortfalls=[]
     for d in demands:
-        filled=round(sum(a['quantity'] for a in allocations if a['demand_id']==d.id),2)
+        filled=round(sum((a['usable_quantity'] if d.required_usable else a['quantity']) for a in allocations if a['demand_id']==d.id),2)
         shortfalls.append({'id':d.id,'title':d.title,'quantity':float(needs[d.id]),'filled':filled,
-                          'remaining':round(max(0,float(needs[d.id])-filled),2),'unit':d.unit})
+                          'remaining':round(max(0,float(needs[d.id])-filled),2),'unit':d.unit,'is_net':bool(d.required_usable)})
     drows=[]
     for d in demands:
         row=demand_data(d,user);row['quantity']=float(needs[d.id]);drows.append(row)
@@ -148,7 +183,7 @@ def compute(user, data):
         'disclaimer':'试算不锁库存；费用使用当前已录入规则；求解状态可核对，不声称原创算法。'}
 
 
-def recovery_compute(user, incident, strategy):
+def recovery_compute(user, incident, strategy, market=False):
     """Replan only undelivered allocations touched by this incident. Other orders are fixed."""
     from .commerce import visible_orders, role
     started=perf_counter(); role(user,'supplier','admin')
@@ -162,7 +197,7 @@ def recovery_compute(user, incident, strategy):
     affected+=legacy
     all_batches=list(StockBatch.objects.select_related('product__owner').filter(status='released',
         product__is_deleted=False,product__status='on_sale').exclude(pk=incident.batch_id))
-    if user.role!='admin': all_batches=[b for b in all_batches if b.product.owner_id in supplier_ids(user,'manage')]
+    if user.role!='admin' and not market: all_batches=[b for b in all_batches if b.product.owner_id in supplier_ids(user,'manage')]
     caps={b.id:float(max(Decimal(0),b.quantity-b.reserved)) for b in all_batches}
     needed={}; options=[]; source={}; order_map={o.id:o for o in affected}
     for o in affected:
@@ -174,10 +209,18 @@ def recovery_compute(user, incident, strategy):
         for b in all_batches:
             if b.product.unit!=o.snapshot.get('unit') or b.product.category!=o.product.category:
                 continue
+            arrival=max(b.available_date or timezone.localdate(),timezone.localdate())+timedelta(days=b.product.delivery_days)
+            if o.promised_date and arrival>o.promised_date:
+                continue
             if quote:
                 # Contractual conditions remain hard during recovery; no implied relaxation.
                 issues=assess(b,quote.demand,quantity=max(Decimal(b.product.min_order),qty),unit_price=o.unit_price_at_purchase)
                 if issues: continue
+                promised_rate=o.snapshot.get('contract',{}).get('yield_rate')
+                if promised_rate:
+                    from .coordination import yield_data
+                    evidence=yield_data(b,quote.demand.purpose,quote.demand.process)
+                    if not evidence or evidence['rate']<float(promised_rate):continue
             elif b.product.variety!=o.product.variety or b.grade!=o.snapshot.get('grade') or b.packaging!=o.snapshot.get('packaging'):
                 continue
             from types import SimpleNamespace
@@ -201,7 +244,7 @@ def recovery_compute(user, incident, strategy):
         for x in selected:
             if x['demand_id']!=o.id:continue
             b=bmap[x['batch_id']]
-            costs=json_price(price_for(b.product,Decimal(str(x['quantity'])),x['goods_price']))
+            costs=json_price(price_for(b.product,Decimal(str(x['quantity'])),x['goods_price'],batch=b))
             parts.append({'batch_id':b.id,'batch_code':b.code,'product':b.product.name,'supplier_id':b.product.owner_id,
                 'supplier':b.product.owner.username,'quantity':x['quantity'],'price':x['goods_price'],
                 'delivery_days':b.product.delivery_days,'version':b.version,'pricing':costs})
@@ -242,13 +285,21 @@ def execute_recovery(plan, actor):
         old=batches[plan.incident.batch_id]
         old.reserved-=release;old.save();movement(old,actor,'recovery_release',reserved=-release,order=o)
         for a in old_parts:
+            if hasattr(a,'supplier_settlement'):
+                settlement=a.supplier_settlement
+                if settlement.status=='confirmed':raise ValidationError('替代供货款已核对，请先协调原供货款再变更该履约安排')
+                settlement.status='cancelled';settlement.save(update_fields=['status'])
             if a.dispatched:a.quantity=a.dispatched;a.save(update_fields=['quantity'])
             else:a.delete()
         for part in row['parts']:
             b=batches[part['batch_id']];qty=Decimal(str(part['quantity']))
             if b.status!='released' or hard_quality_reason(b) or b.quantity-b.reserved<qty or b.version!=part['version']:
                 raise ValidationError('替代批次已变化，请重新计算；本次操作已回滚')
-            OrderAllocation.objects.create(order=o,batch=b,quantity=qty,unit_price=part['price'],terms=part.get('pricing',{}))
+            allocation=OrderAllocation.objects.create(order=o,batch=b,quantity=qty,unit_price=part['price'],terms=part.get('pricing',{}))
+            if b.product.owner_id!=o.product.owner_id:
+                from .models import SupplierSettlement
+                SupplierSettlement.objects.create(order=o,allocation=allocation,payer=o.product.owner,supplier=b.product.owner,
+                    quantity=qty,amount=Decimal(str(part['pricing']['total'])))
             b.reserved+=qty;b.save();movement(b,actor,'recovery_reserve',reserved=qty,order=o)
             # A batch used by multiple rows has a new version within this same transaction.
             for rr in plan.result['rows']:

@@ -114,6 +114,7 @@ async function demo(role) {
                 ['retail', '采购端', 'ShoppingBag'],
                 ['supplier', '供应端', 'Goods'],
                 ['admin', '运营端', 'Operation'],
+                ['cooperative', '协作供货方', 'Connection'],
               ]"
               :key="r"
               :disabled="!!busy"
@@ -275,7 +276,8 @@ async function demo(role) {
   margin-bottom: 12px;
 }
 .demo-buttons {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 9px;
 }
 .demo-buttons button {

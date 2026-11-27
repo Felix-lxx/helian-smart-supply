@@ -32,6 +32,10 @@ const selected = computed(() => w.state.demands.find((d) => d.id === selectedId.
   rows = computed(() =>
     w.state.demands.filter(
       (d) =>
+        (!route.query.date || d.deadline === route.query.date) &&
+        (!route.query.site || d.site_id === Number(route.query.site)) &&
+        (!route.query.unit || d.unit === route.query.unit) &&
+        (route.query.exclude_demo !== '1' || !d.is_demo) &&
         (d.title + d.keyword + d.destination).includes(search.value) &&
         (status.value === 'all' || d.status === status.value),
     ),
@@ -100,7 +104,7 @@ async function sendQuote() {
 async function accept(q) {
   try {
     await ElMessageBox.confirm(
-      `确认接受 ${q.supplier} 的报价，单价 ¥${money(q.price)}，本次承接 ${qty(Math.min(q.quantity, selected.value.remaining))} ${selected.value.unit}？${q.deviations?.length ? '你同时接受已列出的规格偏差。' : ''}包装费和运费以报价明细为准。`,
+      `确认接受 ${q.supplier} 的报价，单价 ¥${money(q.price)}，本次承接 ${qty(selected.value.required_usable ? q.quantity : Math.min(q.quantity, selected.value.remaining))} ${selected.value.unit}？${q.terms?.committed_usable ? '约定预计净用量 ' + qty(q.terms.committed_usable) + ' ' + selected.value.unit + '。' : ''}${q.deviations?.length ? '你同时接受已列出的规格偏差。' : ''}包装费和运费以报价明细为准。`,
       '接受报价',
       { confirmButtonText: '接受并创建订单', cancelButtonText: '再比较一下' },
     )
@@ -186,8 +190,10 @@ async function accept(q) {
           ></el-table-column
         ><el-table-column label="待满足 / 总需求" width="150"
           ><template #default="{ row }"
-            ><b class="good">{{ qty(row.remaining) }}</b> / {{ qty(row.quantity) }}
-            {{ row.unit }}</template
+            ><b class="good">{{ qty(row.remaining) }}</b> / {{ qty(row.quantity) }} {{ row.unit
+            }}<small v-if="row.required_usable" class="data-note" style="display: block"
+              >毛量参考；净缺口 {{ qty(row.remaining_usable) }} {{ row.unit }}</small
+            ></template
           ></el-table-column
         ><el-table-column label="单价预算" width="125"
           ><template #default="{ row }"

@@ -17,7 +17,7 @@ from .models import (StockBatch, Product, Order, PurchaseDemand, DemandQuote, In
     Company, CompanyMember, BusinessSite, User)
 from .commerce_rules import assess, price_for, json_price, movement, public_weight, PURPOSES, FLEXIBLE, hard_quality_reason
 from .decisions import remaining_demand, recovery_compute, execute_recovery
-from .access import supplier_ids
+from .access import supplier_ids, buyer_ids, participant_ids
 
 
 def batch_for(user, pk, lock=False, action='manage'):
@@ -48,10 +48,24 @@ def inspection_priority(batch, demands=None):
                 blocked.append({'id':d.id,'title':d.title,'quantity':float(remaining),'unit':d.unit,
                     'tolerance':d.tolerance,'deadline':d.deadline,'priority':d.priority})
     lo,hi=wilson(batch.sample_size,batch.defect_count)
-    priority=round(sum(x['priority'] for x in blocked)*(hi-lo),2)
+    from math import ceil
+    exposure=0.
+    by_unit={}
+    for row in blocked:
+        d=next((x for x in demands if x.id==row['id']),None) if demands is not None else PurchaseDemand.objects.get(pk=row['id'])
+        days=max(0,(row['deadline']-timezone.localdate()).days)
+        exposure+=row['quantity']*float(d.budget)*row['priority']/(days+1)
+        by_unit[row['unit']]=by_unit.get(row['unit'],0)+row['quantity']
+    task=batch.review_tasks.filter(status='open').first()
+    minutes=task.estimated_minutes if task else 15
+    priority=round(exposure*(hi-lo)/100/max(1,minutes),2)
+    threshold=min((x['tolerance'] for x in blocked),default=None)
+    minimum_sample=ceil(3.84145882*(100-threshold)/threshold) if threshold and threshold>0 else None
     return {'batch_id':batch.id,'code':batch.code,'product':batch.product.name,'interval':[lo,hi],
         'sample_size':batch.sample_size,'defect_count':batch.defect_count,'blocked_demands':blocked,
-        'priority':priority,'reason':'受影响需求优先级之和 × 外观区间宽度；规则排序，不是风险概率'}
+        'priority':priority,'influence_by_unit':by_unit,'estimated_minutes':minutes,
+        'minimum_zero_defect_sample':minimum_sample,
+        'reason':'采购预算暴露 × 需求优先级 × 截止紧迫度 × 区间宽度 ÷ 预计检查分钟；排序参考，不是收益或风险概率'}
 
 
 @api_view(['GET'])
@@ -61,14 +75,14 @@ def workspace(request):
     u=request.user;orders=visible_orders(u)
     batches=StockBatch.objects.select_related('product__owner').prefetch_related('product__price_tiers').filter(product__is_deleted=False)
     if u.role=='supplier':batches=batches.filter(product__owner_id__in=supplier_ids(u))
-    if u.role=='retail':batches=batches.filter(orders__user=u).distinct()
+    if u.role=='retail':batches=batches.filter(orders__user_id__in=buyer_ids(u)).distinct()
     tasks=InspectionTask.objects.select_related('batch__product','demand').order_by('-id')
     if u.role!='admin':tasks=tasks.filter(Q(batch__product__owner_id__in=supplier_ids(u))|Q(creator=u))
     incidents=SupplyIncident.objects.select_related('batch__product','creator').order_by('-id')
     if u.role!='admin':incidents=incidents.filter(Q(batch__product__owner_id__in=supplier_ids(u))|Q(batch__orders__user=u)).distinct()
     plans=[]
     for p in RecoveryPlan.objects.select_related('incident__batch').order_by('-id')[:100]:
-        if u.role=='admin' or p.creator_id==u.id or plan_participants(p)&supplier_ids(u,'manage'):
+        if u.role=='admin' or p.creator_id==u.id or plan_participants(p)&participant_ids(u,'manage'):
             plans.append({'id':p.id,'incident_id':p.incident_id,'batch_code':p.incident.batch.code,
                 'strategy':p.strategy,'result':p.result,'status':p.status,'decisions':p.decisions,
                 'participants':list(plan_participants(p)),'creator_id':p.creator_id,'created_at':p.created_at})
@@ -76,6 +90,7 @@ def workspace(request):
         incidents=SupplyIncident.objects.select_related('batch__product','creator').filter(
             Q(pk__in=[p['incident_id'] for p in plans])|Q(pk__in=incidents.values('id'))).distinct().order_by('-id')
     cases=SettlementCase.objects.filter(order_id__in=orders.values('id')).select_related('order__product','creator')
+    if u.role=='supplier':cases=cases.filter(order__product__owner_id__in=supplier_ids(u))
     ledger=InventoryMovement.objects.filter(batch_id__in=batches.values('id')).select_related('batch','actor').order_by('-id')
     sites=BusinessSite.objects.select_related('company')
     if u.role!='admin':sites=sites.filter(Q(company__owner=u)|Q(company__members__user=u)).distinct()
@@ -85,6 +100,7 @@ def workspace(request):
         priorities=sorted([inspection_priority(b,demands) for b in batches[:100]],key=lambda x:-x['priority'])
     return Response({'tasks':[{'id':t.id,'batch_id':t.batch_id,'batch_code':t.batch.code,'product':t.batch.product.name,
         'demand_id':t.demand_id,'status':t.status,'target_sample':t.target_sample,'metric':t.metric,
+        'estimated_minutes':t.estimated_minutes,'sample_cost':float(t.sample_cost) if t.sample_cost is not None else None,
         'position':t.position,'note':t.note,'result':t.result,'created_at':t.created_at,'completed_at':t.completed_at} for t in tasks[:100]],
         'priorities':priorities,
         'incidents':[{'id':i.id,'batch_id':i.batch_id,'batch_code':i.batch.code,'product':i.batch.product.name,
@@ -111,7 +127,7 @@ def compare(request):
     demand=None
     if data.get('demand_id'):
         demand=PurchaseDemand.objects.filter(pk=data['demand_id']).first()
-        if not demand or (request.user.role=='retail' and demand.buyer_id!=request.user.id):raise PermissionDenied()
+        if not demand or (request.user.role=='retail' and demand.buyer_id not in buyer_ids(request.user)):raise PermissionDenied()
         defaults={key:getattr(demand,key) for key in ['keyword','unit','min_size','grade','packaging','budget','deadline','tolerance','flexible_fields','purpose']}
         defaults['quantity']=remaining_demand(demand)
         data={**defaults,**data}
@@ -131,10 +147,11 @@ def compare(request):
         quantity=min(demand.quantity,available) if b.product.unit==demand.unit else Decimal(0)
         issues=assess(b,demand,quantity=max(quantity,Decimal('.01')),robust=bool(data.get('robust')))
         costs=None
-        try:costs=price_for(b.product,quantity)
+        try:costs=price_for(b.product,quantity,batch=b)
         except ValidationError:pass
-        weight=public_weight(b)
-        actual_yield=(weight['yield_rate']/100) if weight['yield_rate'] else None
+        from .coordination import yield_data
+        evidence=yield_data(b,demand.purpose,str(data.get('process','')))
+        actual_yield=evidence['rate'] if evidence else None
         scenario=data.get('scenario_yield',{}).get(str(b.id)) if isinstance(data.get('scenario_yield',{}),dict) else None
         used_yield=float(number(scenario,Decimal('.01'),Decimal(100)))/100 if scenario is not None else actual_yield
         net=float(quantity)*used_yield if used_yield else None
@@ -165,7 +182,7 @@ def preview(request):
         q=number(item.get('quantity'),Decimal('.01'))
         if b.status!='released' or hard_quality_reason(b) or b.product.status!='on_sale' or b.product.is_deleted or q>b.quantity-b.reserved:
             raise ValidationError(f'{b.code} 库存或上架状态已变化，请调整清单')
-        costs=price_for(b.product,q)
+        costs=price_for(b.product,q,batch=b)
         rows.append({'batch_id':b.id,'code':b.code,**json_price(costs)})
     stable=[{k:v for k,v in row.items() if k!='expires_at'} for row in rows]
     return Response({'items':rows,'total':round(sum(r['total'] for r in rows),2),
@@ -178,7 +195,7 @@ def pricing_signature(items):
     rows=[]
     for item in items:
         b=StockBatch.objects.select_related('product').get(pk=item['batch_id'])
-        costs=json_price(price_for(b.product,number(item['quantity'],Decimal('.01'))))
+        costs=json_price(price_for(b.product,number(item['quantity'],Decimal('.01')),batch=b))
         costs.pop('expires_at',None)
         rows.append({'batch_id':b.id,'code':b.code,**costs})
     return __import__('hashlib').sha256(json.dumps(rows,sort_keys=True,default=str).encode()).hexdigest()
@@ -259,6 +276,8 @@ def review_task(request,pk=None):
             if metric not in ['appearance','rot','size']:raise ValidationError('检查指标不正确')
             t=InspectionTask.objects.create(batch=b,creator=request.user,
                 target_sample=integer(request.data.get('target_sample',50),1,100000),metric=metric,
+                estimated_minutes=integer(request.data.get('estimated_minutes',15),1,1440),
+                sample_cost=number(request.data['sample_cost']) if request.data.get('sample_cost') is not None else None,
                 position=str(request.data.get('position',''))[:160],note=str(request.data.get('note',''))[:2000])
             notice(b.product.owner,f'{b.code} 已安排复检',t.note,f'/reviews?task={t.id}')
         return Response({'id':t.id,'status':t.status})
@@ -299,12 +318,12 @@ def recovery(request,pk=None):
             if not i:raise ValidationError('异常不存在或已完成')
             strategy=request.data.get('strategy','stable')
             if strategy not in ['stable','cost','fast']:raise ValidationError('补配策略不正确')
-            result=recovery_compute(request.user,i,strategy)
+            result=recovery_compute(request.user,i,strategy,market=request.data.get('market') is True)
             p=RecoveryPlan.objects.create(incident=i,creator=request.user,strategy=strategy,
                 result=json.loads(json.dumps(result,cls=DjangoJSONEncoder)))
             return Response({'id':p.id,'result':p.result,'status':p.status})
         p=RecoveryPlan.objects.select_for_update().select_related('incident__batch__product').filter(pk=pk).first()
-        if not p or (request.user.role!='admin' and not (plan_participants(p)|{p.creator_id})&supplier_ids(request.user,'manage')):raise PermissionDenied()
+        if not p or (request.user.role!='admin' and not (plan_participants(p)|{p.creator_id})&participant_ids(request.user,'manage')):raise PermissionDenied()
         action=request.data.get('action')
         if action=='publish':
             if p.creator_id!=request.user.id or p.status!='draft':raise ValidationError('仅创建方可以发送草稿')
@@ -314,7 +333,7 @@ def recovery(request,pk=None):
                 notice(User.objects.get(pk=uid),f'异常补配方案 #{p.id} 待确认',p.incident.note[:200],f'/recovery?plan={p.id}')
         elif action in ['accept','reject']:
             party=int(request.data.get('party_id') or request.user.id)
-            if p.status!='pending' or party not in plan_participants(p) or party not in supplier_ids(request.user,'manage'):raise ValidationError('当前无需你确认或无代表此方的授权')
+            if p.status!='pending' or party not in plan_participants(p) or party not in participant_ids(request.user,'manage'):raise ValidationError('当前无需你确认或无代表此方的授权')
             key=str(party)
             if key in p.decisions:raise ValidationError('你已提交决定，请勿重复确认')
             p.decisions={**p.decisions,key:{'action':action,'actor':request.user.username,'time':timezone.now().isoformat()}}
@@ -355,6 +374,10 @@ def company_api(request):
                     loc=str(request.data.get('location','')).strip()
                     if loc and not coordinates(loc):raise ValidationError('经纬度格式不正确，未知请留空')
                     BusinessSite.objects.create(company=c,name=name[:100],address=address[:300],location=loc[:80],
+                        kind=request.data.get('kind','store') if request.data.get('kind') in ['store','hub','kitchen','origin'] else 'store',
+                        coordinate_source=str(request.data.get('coordinate_source','人工录入'))[:100],
+                        coordinate_system=request.data.get('coordinate_system','WGS84') if request.data.get('coordinate_system') in ['WGS84','CGCS2000'] else 'WGS84',
+                        location_verified=request.data.get('location_verified') is True,
                         contact=str(request.data.get('contact',''))[:80],phone=str(request.data.get('phone',''))[:30])
                 elif action=='member':
                     member=User.objects.filter(username=request.data.get('username')).first()
@@ -364,7 +387,7 @@ def company_api(request):
                     CompanyMember.objects.update_or_create(company=c,user=member,defaults={'job':job})
                 else:raise ValidationError('不支持此动作')
     qs=Company.objects.all() if u.role=='admin' else Company.objects.filter(Q(owner=u)|Q(members__user=u)).distinct()
-    return Response([{'id':c.id,'name':c.name,'kind':c.kind,'owner_id':c.owner_id,
+    return Response([{'id':c.id,'name':c.name,'kind':c.kind,'owner_id':c.owner_id,'owner_role':c.owner.role,
         'members':list(c.members.values('id','user_id','user__username','job')),
         'sites':list(c.sites.values())} for c in qs])
 

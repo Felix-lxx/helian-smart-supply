@@ -7,12 +7,13 @@ const props = defineProps({
   tileUrl: String,
   selected: Number,
   height: { type: String, default: '580px' },
+  links: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['select', 'unavailable'])
 const root = ref(),
   loaded = ref(false),
   failed = ref(false)
-let map, markers, observer, tiles, fittedKind
+let map, markers, routes, observer, tiles, fittedKind, fallbackTimer
 function points() {
   return props.products.filter(
     (p) =>
@@ -29,16 +30,41 @@ function fit() {
   if (list.length > 1)
     map.fitBounds(L.latLngBounds(list.map((p) => [p.coords[1], p.coords[0]])), {
       padding: [40, 40],
-      maxZoom: 7,
+      maxZoom: 12,
       animate: false,
     })
   else if (list.length === 1)
-    map.setView([list[0].coords[1], list[0].coords[0]], 7, { animate: false })
+    map.setView([list[0].coords[1], list[0].coords[0]], list[0].kind === 'site' ? 12 : 7, {
+      animate: false,
+    })
   else map.setView([34, 105], 4)
 }
 function draw() {
   if (!map) return
   markers.clearLayers()
+  routes?.clearLayers()
+  const byId = new Map(points().map((p) => [p.id, p]))
+  for (const link of props.links) {
+    const from = byId.get(link.source),
+      to = byId.get(link.target)
+    if (!from || !to) continue
+    const line = L.polyline(
+      [
+        [from.coords[1], from.coords[0]],
+        [to.coords[1], to.coords[0]],
+      ],
+      {
+        color: link.status === 'issue' ? '#dd9b45' : '#3f83d4',
+        weight: 2,
+        opacity: 0.6,
+        dashArray: '6 8',
+      },
+    )
+    const tip = document.createElement('span')
+    tip.textContent = (link.label || '履约关联') + '；关联示意，非道路路线或车辆位置'
+    line.bindTooltip(tip)
+    line.addTo(routes)
+  }
   for (const p of points()) {
     const selected = p.id === props.selected
     const ll = [p.coords[1], p.coords[0]]
@@ -104,6 +130,7 @@ onMounted(async () => {
       '底图 © <a href="https://www.tianditu.gov.cn/" target="_blank" rel="noopener noreferrer">天地图</a>',
     )
     .addTo(map)
+  routes = L.layerGroup().addTo(map)
   markers = L.layerGroup().addTo(map)
   for (const layer of ['vec', 'cva']) {
     const t = L.tileLayer(props.tileUrl.replace('{layer}', layer), {
@@ -121,15 +148,27 @@ onMounted(async () => {
   }
   draw()
   fit()
-  fittedKind = points()[0]?.kind || 'supply'
+  fallbackTimer = setTimeout(() => {
+    if (!loaded.value) emit('unavailable')
+  }, 7000)
+  fittedKind = points()
+    .map((p) => `${p.id}:${p.coords}`)
+    .join('|')
   observer = new ResizeObserver(() => map?.invalidateSize({ pan: false }))
   observer.observe(root.value)
 })
 watch(
+  () => props.links,
+  () => draw(),
+  { deep: true },
+)
+watch(
   () => props.products,
   () => {
     draw()
-    const kind = points()[0]?.kind || 'supply'
+    const kind = points()
+      .map((p) => `${p.id}:${p.coords}`)
+      .join('|')
     if (map && points().length && kind !== fittedKind) {
       fittedKind = kind
       fit()
@@ -146,6 +185,7 @@ watch(
   },
 )
 onBeforeUnmount(() => {
+  clearTimeout(fallbackTimer)
   observer?.disconnect()
   map?.remove()
   map = null

@@ -3,11 +3,15 @@ const routes = [
   { path: '/login', component: () => import('../views/Login.vue'), meta: { title: '登录' } },
   {
     path: '/',
-    component: () => import('../views/Layout.vue'),
+    component: () => import('../views/WorkspaceShell.vue'),
     children: [
+      { path: 'control', component: () => import('../views/workspace/Control.vue'), meta: { title: '履约调度大屏', wall: true } },
+      { path: 'purchase-plans', component: () => import('../views/workspace/PurchasePlans.vue'), meta: { title: '门店集采单', roles: ['retail','admin','supplier'] } },
+      { path: 'grading', component: () => import('../views/workspace/Grading.vue'), meta: { title: '分级与用途称重', roles: ['supplier','admin'] } },
+      { path: 'accounts', component: () => import('../views/workspace/Accounts.vue'), meta: { title: '实重与资金对账' } },
       {
         path: 'procurement',
-        component: () => import('../views/workspace/Purpose.vue'),
+        component: () => import('../views/workspace/PurposeDesk.vue'),
         meta: { title: '用途采购' },
       },
       {
@@ -22,7 +26,7 @@ const routes = [
       },
       {
         path: 'workboard',
-        component: () => import('../views/workspace/Workboard.vue'),
+        component: () => import('../views/workspace/TaskDesk.vue'),
         meta: { title: '交付作业' },
       },
       {
@@ -33,7 +37,7 @@ const routes = [
       { path: '', redirect: '/home' },
       {
         path: 'home',
-        component: () => import('../views/workspace/Dashboard.vue'),
+        component: () => import('../views/workspace/Overview.vue'),
         meta: { title: '工作台' },
       },
       {

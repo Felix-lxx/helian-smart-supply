@@ -9,6 +9,10 @@ from .models import SettlementCase
 def report_counts(user,params=None,weekly=False):
     from .commerce import visible_orders,day
     params=params or {};qs=visible_orders(user)
+    # An external fulfilment supplier sees its own payable, not the original trade's revenue.
+    if user.role=='supplier':
+        from .access import supplier_ids
+        qs=qs.filter(product__owner_id__in=supplier_ids(user))
     if params.get('exclude_demo')=='1':qs=qs.filter(is_demo=False)
     start=day(params.get('start'));end=day(params.get('end'))
     if start and end and end<start:raise ValidationError('结束日期不能早于开始日期')

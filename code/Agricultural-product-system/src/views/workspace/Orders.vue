@@ -1,10 +1,18 @@
 <script setup>
-import { ref, computed, reactive, watch } from 'vue'
+import { ref, computed, reactive, watch, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useWorkspace, money, qty, dateText, labels } from '@/stores/workspace'
 import StatusBadge from '@/components/StatusBadge.vue'
 import SettlementPanel from '@/components/SettlementPanel.vue'
+import request from '@/utils/request'
+import { useBusinessFeed } from '@/composables/useBusinessFeed'
+const serverCounts = ref({}),
+  paymentReview = ref(0)
+const serverRows = ref([]),
+  serverTotal = ref(0),
+  serverDetail = ref(null),
+  weighingEnabled = ref(false)
 const w = useWorkspace(),
   route = useRoute(),
   search = ref(''),
@@ -35,15 +43,60 @@ watch(
     page.value = 1
   },
 )
-const filtered = computed(() =>
-  w.state.orders.filter(
-    (o) =>
-      (status.value === 'all' || o.status === status.value) &&
-      (o.name + o.number + o.buyer + o.supplier).toLowerCase().includes(search.value.toLowerCase()),
-  ),
+const filtered = computed(() => serverRows.value)
+const rows = computed(() => serverRows.value)
+const detail = computed(
+  () => serverDetail.value || w.state.orders.find((o) => o.id === detailId.value),
 )
-const rows = computed(() => filtered.value.slice((page.value - 1) * 10, page.value * 10)),
-  detail = computed(() => w.state.orders.find((o) => o.id === detailId.value))
+async function loadOrders() {
+  const response = await request.get('/workspace/orders/list/', {
+    params: {
+      status: status.value,
+      search: search.value,
+      page: page.value,
+      sheet: route.query.sheet,
+      date: route.query.date,
+      site: route.query.site,
+      unit: route.query.unit,
+      exclude_demo: route.query.exclude_demo,
+      active:route.query.active,
+      dispatched: route.query.dispatched,
+    },
+    timeout: 30000,
+  })
+  serverRows.value = response.data.items
+  serverTotal.value = response.data.total
+  serverCounts.value = response.data.counts || {}
+  paymentReview.value = response.data.payment_review || 0
+  if (detailId.value) {
+    const current = response.data.items.find((o) => o.id === detailId.value)
+    serverDetail.value =
+      current ||
+      (await request.get('/workspace/orders/list/', { params: { id: detailId.value } })).data
+        .items[0] ||
+      null
+  }
+}
+const { error: orderError, refresh: refreshOrders } = useBusinessFeed(loadOrders)
+let searchTimer
+onBeforeUnmount(() => clearTimeout(searchTimer))
+watch([status, page], () => refreshOrders())
+watch(search, () => {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    page.value = 1
+    refreshOrders()
+  }, 350)
+})
+const measuredNet = computed(() =>
+  Math.max(0, Number(form.gross_weight || 0) - Number(form.tare_weight || 0)),
+)
+watch(measuredNet, (v) => {
+  if (weighingEnabled.value && action.value === 'receive') {
+    form.received_quantity = v
+    if (form.accepted_quantity > v) form.accepted_quantity = v
+  }
+})
 const actionTitles = {
   'submit-payment': '提交付款确认',
   'confirm-payment': '核对收款',
@@ -54,16 +107,23 @@ const actionTitles = {
 }
 function open(o) {
   detailId.value = o.id
+  serverDetail.value = o
   drawer.value = true
 }
 function openAction(o, a) {
   target.value = o
   action.value = a
+  weighingEnabled.value = false
   Object.assign(form, {
     reference: '',
     carrier: '',
     tracking_number: '',
-    quantity: (o.quantity || 0) - (o.dispatched_quantity || 0),
+    quantity: o.fulfillable_quantity ?? (o.quantity || 0) - (o.dispatched_quantity || 0),
+    supplier_id:
+      Number(route.query.supplier) ||
+      o.allocations?.find((x) => x.quantity > x.dispatched)?.supplier_id,
+    gross_weight: undefined,
+    tare_weight: 0,
     delivery_id: o.deliveries?.find((d) => d.status === 'shipped')?.id || null,
     received_quantity:
       o.deliveries?.find((d) => d.status === 'shipped')?.quantity || o.quantity || 0,
@@ -73,29 +133,39 @@ function openAction(o, a) {
     packaging_issue: '',
     note: '',
   })
+  if (a === 'ship' && form.supplier_id)
+    form.quantity = o.allocations
+      .filter((x) => x.supplier_id === form.supplier_id)
+      .reduce((n, x) => n + x.quantity - x.dispatched, 0)
+  if (a === 'receive' && route.query.delivery) chooseDelivery(Number(route.query.delivery))
   dialog.value = true
 }
 function chooseDelivery(id) {
   const d = target.value.deliveries.find((d) => d.id === id)
   if (d) {
-    form.received_quantity = Number(d.quantity)
-    form.accepted_quantity = Number(d.quantity)
+    form.delivery_id = d.id
+    form.received_quantity = Number(d.physical_quantity ?? d.quantity)
+    form.accepted_quantity = Number(d.physical_quantity ?? d.quantity)
   }
 }
 let openedNavigation = ''
 watch(
-  [() => route.fullPath, () => w.state.orders],
-  () => {
+  () => route.fullPath,
+  async () => {
     const id = Number(route.query.order)
-    const o = w.state.orders.find((x) => x.id === id)
-    if (o) {
+    if (!id) return
+    try {
+      const o = (await request.get('/workspace/orders/list/', { params: { id } })).data.items[0]
+      if (!o) return
       detailId.value = id
+      serverDetail.value = o
       drawer.value = true
-      const key = route.fullPath
-      if (openedNavigation !== key && ['ship', 'receive'].includes(route.query.action)) {
-        openedNavigation = key
+      if (openedNavigation !== route.fullPath && ['ship', 'receive'].includes(route.query.action)) {
+        openedNavigation = route.fullPath
         openAction(o, route.query.action)
       }
+    } catch {
+      /* Optional state or user cancellation; keep the current business record. */
     }
   },
   { immediate: true },
@@ -103,9 +173,21 @@ watch(
 async function perform() {
   busy.value = true
   try {
-    await w.act(`orders/${target.value.id}/${action.value}/`, form, '订单已更新，相关方已收到通知')
+    const payload = { ...form }
+    if (!weighingEnabled.value) {
+      delete payload.gross_weight
+      delete payload.tare_weight
+    }
+    const saved = await w.act(
+      `orders/${target.value.id}/${action.value}/`,
+      payload,
+      '订单已更新，相关方已收到通知',
+    )
+    if (detailId.value === saved.id) serverDetail.value = saved
+    await refreshOrders()
     dialog.value = false
   } catch {
+    // Operation errors are shown by the shared workspace action; dialog cancellation is intentional.
   } finally {
     busy.value = false
   }
@@ -118,7 +200,9 @@ async function cancel(o) {
       cancelButtonText: '继续采购',
     })
     await w.act(`orders/${o.id}/cancel/`, {}, '订单已取消，库存已释放')
-  } catch {}
+  } catch {
+    /* Optional state or user cancellation; keep the current business record. */
+  }
 }
 function exportOrders() {
   const safe = (v) =>
@@ -161,31 +245,45 @@ function exportOrders() {
         </p>
       </div>
       <div class="head-actions">
-        <el-button icon="Download" @click="exportOrders">导出当前明细</el-button
-        ><el-button icon="Refresh" @click="w.refresh()">刷新订单</el-button>
+        <el-button icon="Download" @click="exportOrders">导出当前页</el-button
+        ><el-button
+          icon="Refresh"
+          @click="
+            async () => {
+              await w.refresh()
+              await refreshOrders()
+            }
+          "
+          >刷新订单</el-button
+        >
       </div>
     </div>
+    <div v-if="orderError" class="business-error">
+      {{ orderError }}<el-button link @click="refreshOrders()">重试</el-button>
+    </div>
+    <p v-if="route.query.date || route.query.site" class="data-note section-gap">
+      当前范围：{{ route.query.date || '全部到货日' }} · {{ route.query.unit || '全部单位'
+      }}{{ route.query.site ? ' · 已筛选收货点' : '' }}
+    </p>
     <div class="metrics">
       <div class="metric">
         <span class="metric-label">待核对收款</span
-        ><b class="metric-value" style="display: block">{{
-          w.state.orders.filter((o) => o.payment_status === 'review').length
-        }}</b
+        ><b class="metric-value" style="display: block">{{ paymentReview }}</b
         ><span class="metric-foot">由收款方核实实际到账</span>
       </div>
       <div class="metric">
         <span class="metric-label">等待发运</span
-        ><b class="metric-value" style="display: block">{{ w.state.stats.shipping || 0 }}</b
+        ><b class="metric-value" style="display: block">{{ serverCounts.paid || 0 }}</b
         ><span class="metric-foot">已确认收款的订单</span>
       </div>
       <div class="metric">
         <span class="metric-label">运输途中</span
-        ><b class="metric-value" style="display: block">{{ w.state.stats.transit || 0 }}</b
+        ><b class="metric-value" style="display: block">{{ serverCounts.shipped || 0 }}</b
         ><span class="metric-foot">待采购方验收</span>
       </div>
       <div class="metric">
         <span class="metric-label">验收差异</span
-        ><b class="metric-value warn" style="display: block">{{ w.state.stats.issues || 0 }}</b
+        ><b class="metric-value warn" style="display: block">{{ serverCounts.issue || 0 }}</b
         ><span class="metric-foot">双方协商后确认完成</span>
       </div>
     </div>
@@ -261,13 +359,13 @@ function exportOrders() {
                 @click="openAction(row, 'submit-payment')"
                 >提交付款</el-button
               ><el-button
-                v-if="!w.isBuyer && row.payment_status === 'review'"
+                v-if="row.can_manage_trade && row.payment_status === 'review'"
                 link
                 type="primary"
                 @click="openAction(row, 'confirm-payment')"
                 >核对收款</el-button
               ><el-button
-                v-if="!w.isBuyer && row.status === 'paid'"
+                v-if="row.can_ship && row.status === 'paid'"
                 link
                 type="primary"
                 @click="openAction(row, 'ship')"
@@ -282,7 +380,7 @@ function exportOrders() {
                 @click="openAction(row, 'receive')"
                 >到货验收</el-button
               ><el-button
-                v-if="!w.isBuyer && row.status === 'issue'"
+                v-if="row.can_manage_trade && row.status === 'issue'"
                 link
                 type="primary"
                 @click="open(row)"
@@ -292,17 +390,15 @@ function exportOrders() {
           ></el-table-column
         ></el-table
       ><el-pagination
-        v-if="filtered.length > 10"
+        v-if="serverTotal > 20"
         v-model:current-page="page"
-        :total="filtered.length"
-        :page-size="10"
+        :total="serverTotal"
+        :page-size="20"
         layout="total,prev,pager,next"
       />
     </section>
     <p class="data-note">
-      付款以收款方核对记录为准，本系统不会自动扣款或执行退款。{{
-        w.state.stats.limited ? '当前工作台展示最近500笔订单。' : ''
-      }}
+      付款以收款方核对记录为准，本系统不会自动扣款或执行退款。{{ '订单列表按完整授权数据分页。' }}
     </p>
     <el-drawer v-model="drawer" title="订单详情与交付时间线" size="560px"
       ><template v-if="detail"
@@ -339,15 +435,28 @@ function exportOrders() {
             >
           </div>
           <div v-if="detail.allocations?.length" class="detail-section">
+            <div v-if="detail.site" class="kv">
+              <span>关联收货点</span><b>{{ detail.site }}</b>
+            </div>
+            <div class="record-actions section-gap">
+              <router-link
+                v-if="detail.sheet_id"
+                :to="'/purchase-plans?sheet=' + detail.sheet_id"
+                class="text-link"
+                >打开门店集采单</router-link
+              ><router-link :to="'/workboard?search=' + detail.id" class="text-link"
+                >查看关联作业</router-link
+              ><router-link v-if="detail.reconciliations?.length" to="/accounts" class="text-link"
+                >核对实重差额</router-link
+              >
+            </div>
             <h3 style="margin: 18px 0 10px">当前履约分配</h3>
             <div v-for="a in detail.allocations" :key="a.id" class="kv">
               <span>{{ a.batch_code }}</span
               ><b>{{ qty(a.quantity) }} {{ detail.unit }} / 已发 {{ qty(a.dispatched) }}</b>
             </div>
             <p v-if="detail.snapshot.recovery_plan" class="data-note">
-              已按各方确认的补配方案 #{{
-                detail.snapshot.recovery_plan
-              }}
+              已按各方确认的补配方案 #{{ detail.snapshot.recovery_plan }}
               更新履约批次；原成交快照保留，价差在下方处理单核对。
             </p>
           </div>
@@ -395,6 +504,18 @@ function exportOrders() {
             <p v-if="!detail.events.length" class="muted small">旧版订单尚无详细事件记录。</p>
           </div>
         </div>
+        <div v-if="detail.reconciliations?.length" class="detail-section">
+          <h3>实重对账记录</h3>
+          <div v-for="r in detail.reconciliations" :key="r.id" class="kv">
+            <span
+              >约定 {{ qty(r.expected_quantity) }} / 合格 {{ qty(r.accepted_quantity) }}
+              {{ detail.unit }}</span
+            ><b>尾差 ¥{{ money(r.difference_amount) }}</b>
+          </div>
+          <el-button link type="primary" @click="$router.push('/accounts')"
+            >进入实重对账中心</el-button
+          >
+        </div>
         <SettlementPanel :order="detail" />
         <el-button
           v-if="w.isBuyer && detail.status === 'pending' && detail.payment_status === 'unpaid'"
@@ -423,12 +544,60 @@ function exportOrders() {
             <p>付款方提交：{{ target.payment_reference }}</p>
             <p class="data-note">请在你的收款账户核实金额与付款方后确认。此操作仅记录核对结果。</p>
           </div>
+          <el-form-item
+            v-if="['ship', 'receive'].includes(action) && ['kg', '斤'].includes(target.unit)"
+            label="实际称重录入"
+          >
+            <el-switch
+              v-model="weighingEnabled"
+              active-text="毛重减皮重"
+              inactive-text="直接填写数量"
+            />
+            <p class="data-note" style="font-size: 11px">
+              约定允差 {{ target.weight_tolerance_pct }}%；{{
+                target.settlement_basis === 'accepted_weight'
+                  ? '合格实重结算，验收后双方核对尾差'
+                  : '依原成交数量结算，异常另行处理'
+              }}。
+            </p>
+          </el-form-item>
+          <div
+            v-if="weighingEnabled && ['ship', 'receive'].includes(action)"
+            class="mobile-form-row"
+          >
+            <el-form-item :label="'毛重 / ' + target.unit"
+              ><el-input-number v-model="form.gross_weight" :min="0.01" :precision="2"
+            /></el-form-item>
+            <el-form-item :label="'皮重 / ' + target.unit"
+              ><el-input-number v-model="form.tare_weight" :min="0" :precision="2"
+            /></el-form-item>
+            <p class="data-note">实际净重 {{ qty(measuredNet) }} {{ target.unit }}</p>
+          </div>
           <template v-if="action === 'ship'"
-            ><el-form-item :label="'本次发运数量 / ' + target.unit"
+            ><el-form-item
+              v-if="new Set(target.allocations?.map((a) => a.supplier_id)).size > 1"
+              label="本次实际履约方"
+              ><el-select
+                v-model="form.supplier_id"
+                @change="
+                  (id) =>
+                    (form.quantity = target.allocations
+                      .filter((a) => a.supplier_id === id)
+                      .reduce((n, a) => n + a.quantity - a.dispatched, 0))
+                "
+                ><el-option
+                  v-for="a in [
+                    ...new Map(target.allocations.map((a) => [a.supplier_id, a])).values(),
+                  ]"
+                  :key="a.supplier_id"
+                  :value="a.supplier_id"
+                  :label="a.supplier" /></el-select
+            ></el-form-item>
+            <el-form-item :label="'本次发运数量 / ' + target.unit"
               ><el-input-number
                 v-model="form.quantity"
                 :min="0.01"
-                :max="target.quantity - target.dispatched_quantity"
+                :max="target.fulfillable_quantity ?? target.quantity - target.dispatched_quantity"
                 :precision="2" /></el-form-item
             ><el-form-item label="承运方 / 配送负责人"
               ><el-input
@@ -446,22 +615,22 @@ function exportOrders() {
                   :key="d.id"
                   :value="d.id"
                   :label="
-                    d.tracking_number + ' / ' + qty(d.quantity) + target.unit
+                    (d.kind === 'replacement' ? '补发 · ' : '') +
+                    d.tracking_number +
+                    ' / ' +
+                    qty(d.physical_quantity ?? d.quantity) +
+                    target.unit
                   " /></el-select></el-form-item
             ><el-form-item :label="'实际到货数量 / ' + target.unit"
               ><el-input-number
                 v-model="form.received_quantity"
                 :min="0"
-                :max="
-                  target.deliveries?.find((d) => d.id === form.delivery_id)?.quantity ||
-                  target.quantity
-                "
                 :precision="2" /></el-form-item
             ><el-form-item :label="'符合约定的合格数量 / ' + target.unit"
               ><el-input-number
                 v-model="form.accepted_quantity"
                 :min="0"
-                :max="target.quantity"
+                :max="form.received_quantity"
                 :precision="2" /></el-form-item
             ><el-form-item label="品质差异 / 足量到货也可登记"
               ><el-input

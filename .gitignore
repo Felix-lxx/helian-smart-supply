@@ -3,6 +3,7 @@
 !**/.env.example
 .venv/
 .run/
+.impeccable/
 **/node_modules/
 **/__pycache__/
 

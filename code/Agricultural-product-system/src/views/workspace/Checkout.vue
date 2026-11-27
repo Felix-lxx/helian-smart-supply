@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { useWorkspace, money, qty } from '@/stores/workspace'
+import { useWorkspace, money, todayPlus } from '@/stores/workspace'
 import request from '@/utils/request'
 import { ElMessage } from 'element-plus'
 const w = useWorkspace(),
@@ -11,6 +11,28 @@ const w = useWorkspace(),
   addresses = ref([]),
   addressId = ref(null)
 const submissionKey = ref(crypto.randomUUID())
+const companies = ref([]),
+  siteId = ref(null),
+  promised = ref(todayPlus(3)),
+  basis = ref('contract'),
+  tolerance = ref(0)
+const sites = computed(() =>
+  companies.value
+    .filter((c) => c.owner_role === 'retail')
+    .flatMap((c) => c.sites.map((s) => ({ ...s, company: c.name }))),
+)
+const weightOnly = computed(() => w.cart.every((c) => ['kg', '斤'].includes(c.unit)))
+function chooseSite(id) {
+  const site = sites.value.find((s) => s.id === id)
+  if (site) {
+    Object.assign(address, {
+      receiver_name: site.contact,
+      receiver_phone: site.phone,
+      address: site.address,
+    })
+    addressId.value = null
+  }
+}
 const pricing = ref(null),
   quoting = ref(false),
   priceError = ref('')
@@ -28,7 +50,7 @@ async function reprice() {
   priceError.value = ''
   try {
     const r = await request.post('/workspace/pricing/preview/', {
-      items: w.cart.map((c) => ({ batch_id: c.batch_id, quantity: c.quantity })),
+      items: w.cart.map((c) => ({ ...c, batch_id: c.batch_id, quantity: c.quantity })),
     })
     if (seq === quoteSequence) pricing.value = r.data
   } catch (e) {
@@ -51,12 +73,16 @@ watch(
   { immediate: true },
 )
 watch(address, () => (submissionKey.value = crypto.randomUUID()), { deep: true })
+watch([siteId, promised, basis, tolerance], () => {
+  submissionKey.value = crypto.randomUUID()
+})
 onBeforeUnmount(() => clearTimeout(quoteTimer))
 function remove(i) {
   w.cart.splice(i, 1)
   w.persistCart()
 }
 function choose(id) {
+  siteId.value = null
   const a = addresses.value.find((x) => x.id === id)
   if (a)
     Object.assign(address, {
@@ -92,8 +118,12 @@ async function submit() {
       {
         idempotency_key: submissionKey.value,
         pricing_signature: pricing.value.signature,
-        items: w.cart.map((c) => ({ batch_id: c.batch_id, quantity: c.quantity })),
+        items: w.cart.map((c) => ({ ...c, batch_id: c.batch_id, quantity: c.quantity })),
         address,
+        site_id: siteId.value,
+        promised_date: promised.value,
+        settlement_basis: basis.value,
+        weight_tolerance_pct: tolerance.value,
       },
       '采购订单已创建，库存已预留',
     )
@@ -101,19 +131,23 @@ async function submit() {
     w.persistCart()
     router.push('/orders')
   } catch {
+    // Operation errors are shown by the shared workspace action; dialog cancellation is intentional.
   } finally {
     busy.value = false
   }
 }
 onMounted(async () => {
   try {
+    companies.value = (await request.get('/workspace/companies/')).data
     addresses.value = (await request.get('/addresses/')).data
     const a = addresses.value.find((x) => x.is_default) || addresses.value[0]
     if (a) {
       addressId.value = a.id
       choose(a.id)
     }
-  } catch {}
+  } catch {
+    /* Optional state or user cancellation; keep the current business record. */
+  }
 })
 </script>
 <template>
@@ -167,6 +201,23 @@ onMounted(async () => {
       <section class="panel">
         <div class="panel-head"><h2>交付与金额确认</h2></div>
         <div class="panel-body">
+          <el-form-item label="关联门店或收货点">
+            <el-select
+              v-model="siteId"
+              clearable
+              placeholder="选择门店，与交付地图和作业关联"
+              style="width: 100%"
+              @change="chooseSite"
+            >
+              <el-option
+                v-for="s in sites"
+                :key="s.id"
+                :value="s.id"
+                :label="s.name + ' · ' + s.company"
+              />
+            </el-select>
+          </el-form-item>
+
           <el-select
             v-if="addresses.length"
             v-model="addressId"
@@ -186,9 +237,42 @@ onMounted(async () => {
             ><el-form-item label="详细收货地址"
               ><el-input
                 v-model="address.address"
+                :readonly="!!siteId"
                 type="textarea"
                 :rows="3" /></el-form-item></el-form
           ><el-button link type="primary" @click="saveAddress">保存为常用收货地址</el-button>
+          <div class="checkout-agreement">
+            <el-form-item label="约定到货日"
+              ><el-date-picker
+                v-model="promised"
+                type="date"
+                value-format="YYYY-MM-DD"
+                :clearable="false"
+                style="width: 100%"
+            /></el-form-item>
+            <el-form-item label="结算口径"
+              ><el-select v-model="basis" style="width: 100%"
+                ><el-option value="contract" label="依约定数量结算，异常另行处理" /><el-option
+                  value="accepted_weight"
+                  label="按合格实重核对数量尾差"
+                  :disabled="!weightOnly" /></el-select
+            ></el-form-item>
+            <el-form-item label="双方约定的数量允差 / %"
+              ><el-input-number
+                v-model="tolerance"
+                :min="0"
+                :max="10"
+                :precision="2"
+                style="width: 100%"
+            /></el-form-item>
+            <p class="data-note" style="font-size: 11px">
+              {{
+                basis === 'accepted_weight'
+                  ? '验收后以成交单价计算数量尾差，供货方核对重量后，双方登记实际退款或补款。'
+                  : '当前依成交数量与价格快照结算。'
+              }}装车实际净重须在所确认的允差内。
+            </p>
+          </div>
           <div class="kv section-gap">
             <span>货源项目</span><b>{{ w.cart.length }} 项</b>
           </div>
@@ -224,6 +308,11 @@ onMounted(async () => {
   </div>
 </template>
 <style scoped>
+.checkout-agreement {
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
 .checkout-grid {
   display: grid;
   grid-template-columns: 1.8fr 1fr;

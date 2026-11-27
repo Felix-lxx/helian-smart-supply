@@ -1,2 +1,2 @@
-<script setup>import './assets/workspace.css'</script>
+<script setup>import './assets/workspace.css'; import './assets/upgrade.css'</script>
 <template><router-view /></template>

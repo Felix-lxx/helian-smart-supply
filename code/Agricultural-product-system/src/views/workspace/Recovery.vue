@@ -1,15 +1,17 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { ElMessageBox, ElMessage } from 'element-plus'
+import { useRoute } from 'vue-router'
+import { ElMessageBox } from 'element-plus'
 import { useWorkspace, money, qty, dateText } from '@/stores/workspace'
 import BusinessChart from '@/components/BusinessChart.vue'
 const w = useWorkspace(),
   route = useRoute(),
-  router = useRouter(),
   incidentId = ref(null),
   planId = ref(null),
   strategy = ref('stable'),
+  marketScope = ref(false),
+  flowUnit = ref('kg'),
+  comparing = ref(false),
   busy = ref(false),
   creating = ref(false),
   view = ref('changes')
@@ -63,8 +65,15 @@ const decidingParty = computed(() =>
   ),
 )
 const canDecide = computed(() => plan.value?.status === 'pending' && !!decidingParty.value)
+watch(
+  () => plan.value?.id,
+  () => {
+    const units = [...new Set(plan.value?.result.rows.map((r) => r.unit) || [])]
+    if (!units.includes(flowUnit.value)) flowUnit.value = units[0] || 'kg'
+  },
+)
 const chart = computed(() => {
-  const rows = plan.value?.result.rows || [],
+  const rows = (plan.value?.result.rows || []).filter((r) => r.unit === flowUnit.value),
     nodes = [],
     links = [],
     seen = new Set()
@@ -124,13 +133,31 @@ async function calculate() {
   try {
     const r = await w.act(
       'recovery/',
-      { incident_id: incidentId.value, strategy: strategy.value },
+      { incident_id: incidentId.value, strategy: strategy.value, market: marketScope.value },
       '补配试算已完成，尚未改动订单',
     )
     planId.value = r.id
   } catch {
+    // Operation errors are shown by the shared workspace action; dialog cancellation is intentional.
   } finally {
     busy.value = false
+  }
+}
+async function compareStrategies() {
+  comparing.value = true
+  try {
+    for (const key of ['stable', 'cost', 'fast']) {
+      const r = await w.act(
+        'recovery/',
+        { incident_id: incidentId.value, strategy: key, market: marketScope.value },
+        '',
+      )
+      planId.value = r.id
+    }
+  } catch {
+    // Operation errors are shown by the shared workspace action; dialog cancellation is intentional.
+  } finally {
+    comparing.value = false
   }
 }
 async function createIncident() {
@@ -139,7 +166,9 @@ async function createIncident() {
     incidentId.value = r.id
     creating.value = false
     await calculate()
-  } catch {}
+  } catch {
+    /* Optional state or user cancellation; keep the current business record. */
+  }
 }
 async function decide(action) {
   try {
@@ -154,7 +183,9 @@ async function decide(action) {
       { action, party_id: decidingParty.value },
       action === 'publish' ? '方案已发送给相关采购与供货方' : '决定已记录，其他工作区同步可见',
     )
-  } catch {}
+  } catch {
+    /* Optional state or user cancellation; keep the current business record. */
+  }
 }
 function selectIncident(i) {
   incidentId.value = i.id
@@ -228,6 +259,13 @@ onMounted(async () => {
                 >生成补配方案</el-button
               >
             </div>
+            <div v-if="!w.isBuyer" class="record-actions section-gap">
+              <el-checkbox v-model="marketScope">比较其他已上架供货方</el-checkbox>
+              <el-button :loading="comparing" plain @click="compareStrategies"
+                >比较三种策略</el-button
+              >
+              <span class="small muted">跨供货方需所有参与方确认及供货款核对后执行发运</span>
+            </div>
             <div v-if="!w.isBuyer" class="strategy-controls section-gap">
               <button
                 v-for="(s, k) in strategies"
@@ -239,6 +277,33 @@ onMounted(async () => {
                 ><small>{{ s[1] }}</small>
               </button>
             </div>
+          </div>
+        </section>
+        <section v-if="plans.length > 1" class="panel section-gap">
+          <div class="panel-head">
+            <h2>方案并排比较</h2>
+            <span class="small muted">均为试算，确认后才改写预留</span>
+          </div>
+          <div class="recovery-plan-comparison">
+            <button
+              v-for="p in plans.slice(0, 6)"
+              :key="p.id"
+              :class="{ active: plan?.id === p.id }"
+              @click="planId = p.id"
+            >
+              <b>{{ strategies[p.strategy]?.[0] }} #{{ p.id }}</b
+              ><span
+                >恢复 {{ p.result.summary.recovered_orders }} /
+                {{ p.result.summary.affected_orders }} 笔</span
+              ><strong
+                >{{ p.result.summary.amount_change > 0 ? '+' : '' }}¥{{
+                  money(p.result.summary.amount_change)
+                }}</strong
+              ><small
+                >{{ p.result.summary.changed_links }} 处新连接 ·
+                {{ p.result.summary.supplier_switches }} 次供应方切换</small
+              >
+            </button>
           </div>
         </section>
         <template v-if="plan"
@@ -284,6 +349,18 @@ onMounted(async () => {
                   补配流向
                 </button>
               </div>
+              <el-radio-group
+                v-if="view === 'flow'"
+                v-model="flowUnit"
+                class="section-gap"
+                size="small"
+                ><el-radio-button
+                  v-for="u in [...new Set(plan.result.rows.map((r) => r.unit))]"
+                  :key="u"
+                  :value="u"
+                  >{{ u }}</el-radio-button
+                ></el-radio-group
+              >
               <template v-if="view === 'changes'"
                 ><div v-for="r in plan.result.rows" :key="r.order_id" class="allocation-change">
                   <div class="before">

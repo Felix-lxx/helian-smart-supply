@@ -122,6 +122,10 @@ class Order(models.Model):
     resolution = models.TextField(blank=True)
     events = models.JSONField(default=list, blank=True)
     is_demo = models.BooleanField(default=False)
+    sheet = models.ForeignKey('ProcurementSheet', null=True, blank=True, on_delete=models.PROTECT, related_name='orders')
+    site = models.ForeignKey('BusinessSite', null=True, blank=True, on_delete=models.PROTECT, related_name='orders')
+    weight_tolerance_pct = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    settlement_basis = models.CharField(max_length=20, default='contract')
 
     class Meta:
         db_table = 'biz_order'
@@ -242,6 +246,8 @@ class StockBatch(models.Model):
     removal_date = models.DateField(null=True, blank=True)
     parent = models.ForeignKey('self', null=True, blank=True, on_delete=models.PROTECT, related_name='children')
     version = models.PositiveIntegerField(default=1)
+    sale_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    intended_purpose = models.CharField(max_length=30, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -268,6 +274,10 @@ class PurchaseDemand(models.Model):
     version = models.PositiveIntegerField(default=1)
     status = models.CharField(max_length=20, default='open')
     is_demo = models.BooleanField(default=False)
+    sheet = models.ForeignKey('ProcurementSheet', null=True, blank=True, on_delete=models.PROTECT, related_name='demands')
+    site = models.ForeignKey('BusinessSite', null=True, blank=True, on_delete=models.PROTECT, related_name='demands')
+    required_usable = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    process = models.CharField(max_length=80, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
 
@@ -303,6 +313,8 @@ class WorkspaceNotification(models.Model):
     route = models.CharField(max_length=100, default='/orders')
     read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+    task = models.ForeignKey('FulfilmentTask', null=True, blank=True, on_delete=models.SET_NULL, related_name='notifications')
+    resolved = models.BooleanField(default=False)
 
 
 class CheckoutSubmission(models.Model):
@@ -341,6 +353,9 @@ class InspectionTask(models.Model):
     result = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    estimated_minutes = models.PositiveIntegerField(default=15)
+    sample_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
 
 
 class SupplyIncident(models.Model):
@@ -383,6 +398,11 @@ class DeliveryRecord(models.Model):
     receipt = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
     received_at = models.DateTimeField(null=True, blank=True)
+    supplier = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name='fulfilled_deliveries')
+    kind = models.CharField(max_length=20, default='normal')
+    case = models.ForeignKey('SettlementCase', null=True, blank=True, on_delete=models.PROTECT, related_name='deliveries')
+    physical_quantity = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    weighing = models.JSONField(default=dict, blank=True)
 
 
 class SettlementCase(models.Model):
@@ -422,9 +442,110 @@ class BusinessSite(models.Model):
     location = models.CharField(max_length=80, blank=True)
     contact = models.CharField(max_length=80, blank=True)
     phone = models.CharField(max_length=30, blank=True)
+    kind = models.CharField(max_length=20, default='store')
+    coordinate_source = models.CharField(max_length=100, blank=True)
+    coordinate_system = models.CharField(max_length=20, default='WGS84')
+    location_verified = models.BooleanField(default=False)
 
 
 class ScheduledJobRun(models.Model):
     name = models.CharField(max_length=80)
     result = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class ProcurementSheet(models.Model):
+    buyer = models.ForeignKey(User, on_delete=models.PROTECT, related_name='procurement_sheets')
+    creator = models.ForeignKey(User, on_delete=models.PROTECT, related_name='created_sheets')
+    company = models.ForeignKey(Company, null=True, blank=True, on_delete=models.PROTECT, related_name='procurement_sheets')
+    title = models.CharField(max_length=160)
+    delivery_date = models.DateField()
+    cutoff_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, default='open')
+    submission_key = models.CharField(max_length=80)
+    template = models.BooleanField(default=False)
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['creator', 'submission_key'], name='unique_procurement_submission')]
+
+
+class PurposeYieldRecord(models.Model):
+    batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name='yield_records')
+    actor = models.ForeignKey(User, on_delete=models.PROTECT)
+    purpose = models.CharField(max_length=30)
+    process = models.CharField(max_length=80)
+    input_weight = models.DecimalField(max_digits=12, decimal_places=2)
+    usable_weight = models.DecimalField(max_digits=12, decimal_places=2)
+    scope = models.CharField(max_length=20, default='sample')
+    note = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class BatchGradingRecord(models.Model):
+    batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name='grading_records')
+    actor = models.ForeignKey(User, on_delete=models.PROTECT)
+    input_quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    loss_quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    outputs = models.JSONField(default=list)
+    note = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class FulfilmentTask(models.Model):
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name='tasks')
+    batch = models.ForeignKey(StockBatch, null=True, blank=True, on_delete=models.PROTECT, related_name='fulfilment_tasks')
+    supplier = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name='supply_tasks')
+    assignee = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name='assigned_tasks')
+    delivery = models.ForeignKey(DeliveryRecord, null=True, blank=True, on_delete=models.PROTECT, related_name='tasks')
+    site = models.ForeignKey(BusinessSite, null=True, blank=True, on_delete=models.PROTECT, related_name='tasks')
+    kind = models.CharField(max_length=20, default='pick')
+    status = models.CharField(max_length=20, default='queued')
+    quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    due_at = models.DateTimeField(null=True, blank=True)
+    source_key = models.CharField(max_length=160, unique=True)
+    note = models.TextField(blank=True)
+    evidence = models.JSONField(default=list)
+    events = models.JSONField(default=list)
+    version = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class WeightReconciliation(models.Model):
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name='reconciliations')
+    delivery = models.OneToOneField(DeliveryRecord, on_delete=models.PROTECT, related_name='reconciliation')
+    creator = models.ForeignKey(User, on_delete=models.PROTECT)
+    expected_quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    received_quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    accepted_quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    difference_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=20, default='pending')
+    note = models.TextField(blank=True)
+    case = models.OneToOneField(SettlementCase, null=True, blank=True, on_delete=models.PROTECT, related_name='weight_reconciliation')
+    created_at = models.DateTimeField(auto_now_add=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+
+class SupplierSettlement(models.Model):
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name='supplier_settlements')
+    allocation = models.OneToOneField(OrderAllocation, null=True, blank=True, on_delete=models.SET_NULL, related_name='supplier_settlement')
+    payer = models.ForeignKey(User, on_delete=models.PROTECT, related_name='supply_payables')
+    supplier = models.ForeignKey(User, on_delete=models.PROTECT, related_name='supply_receivables')
+    quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=20, default='pending')
+    reference = models.CharField(max_length=200, blank=True)
+    events = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class BusinessEvent(models.Model):
+    order = models.ForeignKey(Order, null=True, blank=True, on_delete=models.PROTECT, related_name='business_events')
+    batch = models.ForeignKey(StockBatch, null=True, blank=True, on_delete=models.PROTECT, related_name='business_events')
+    demand = models.ForeignKey(PurchaseDemand, null=True, blank=True, on_delete=models.PROTECT, related_name='business_events')
+    actor = models.ForeignKey(User, null=True, on_delete=models.SET_NULL)
+    title = models.CharField(max_length=160)
+    note = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -30,7 +30,10 @@ function open(action) {
   dialog.value = action
   Object.assign(form, {
     name: '',
-    kind: w.isBuyer ? 'buyer' : 'supplier',
+    kind: action === 'site' ? 'store' : w.isBuyer ? 'buyer' : 'supplier',
+    coordinate_source: '人工录入',
+    coordinate_system: 'WGS84',
+    location_verified: false,
     address: '',
     location: '',
     contact: '',
@@ -50,6 +53,7 @@ async function save() {
     dialog.value = ''
     await load()
   } catch {
+    // Operation errors are shown by the shared workspace action; dialog cancellation is intentional.
   } finally {
     busy.value = false
   }
@@ -152,10 +156,30 @@ onMounted(load)
           ><el-form-item :label="dialog === 'site' ? '站点名称' : '主体名称'"
             ><el-input v-model="form.name" /></el-form-item
           ><template v-if="dialog === 'site'"
+            ><el-form-item label="站点类型"
+              ><el-select v-model="form.kind"
+                ><el-option label="门店" value="store" /><el-option
+                  label="中央厨房"
+                  value="kitchen" /><el-option label="集配中心" value="hub" /><el-option
+                  label="产地"
+                  value="origin" /></el-select></el-form-item
             ><el-form-item label="详细地址"><el-input v-model="form.address" /></el-form-item
             ><el-form-item label="经度,纬度 / 未知可留空"
               ><el-input v-model="form.location" placeholder="WGS84/CGCS2000 经度,纬度；未知留空"
             /></el-form-item>
+            <div class="mobile-form-row">
+              <el-form-item label="坐标系"
+                ><el-select v-model="form.coordinate_system"
+                  ><el-option label="WGS84" value="WGS84" /><el-option
+                    label="CGCS2000"
+                    value="CGCS2000" /></el-select></el-form-item
+              ><el-form-item label="坐标来源"
+                ><el-input v-model="form.coordinate_source" placeholder="例如：现场定位或人工标注"
+              /></el-form-item>
+            </div>
+            <el-checkbox v-model="form.location_verified" :disabled="!form.location"
+              >已核对坐标与实际收货点一致</el-checkbox
+            >
             <div class="mobile-form-row">
               <el-form-item label="联系人"><el-input v-model="form.contact" /></el-form-item
               ><el-form-item label="电话"

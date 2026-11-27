@@ -50,6 +50,7 @@ router.register(r'addresses', AddressViewSet, basename='address')
 
 # URL 路由配置
 urlpatterns = [
+    path('workspace/', include('api.fulfilment_api')),
     path('workspace/', include('api.map_api')),
     path('workspace/', include('api.collaboration_api')),
     path('workspace/', include('api.commerce')),

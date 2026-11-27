@@ -6,10 +6,6 @@ from rest_framework.exceptions import PermissionDenied
 import time
 import hashlib
 import requests
-try:
-    import torch
-except ImportError:
-    torch = None
 import os
 import uuid
 from PIL import Image
@@ -211,15 +207,6 @@ class ProductOnSaleView(APIView):
     permission_classes = [IsAuthenticated]
     def post(self, request, pk):
         return Response({'detail':'请通过批次工作区上架，需核对放行库存'},status=409)
-        if not is_user_realname_approved(request.user): return Response({"error": "请先实名认证"}, status=403)
-        try:
-            product = Product.objects.get(pk=pk, owner=request.user, is_deleted=False)
-            before = {'status': product.status}
-            product.status = 'on_sale'
-            product.save()
-            ProductActionLog.objects.create(product=product, operator=request.user, action_type='on_sale', before_snapshot=before, after_snapshot={'status': 'on_sale'})
-            return Response({"message": "商品已上架"})
-        except: return Response({"error": "商品不存在"}, status=404)
 
 class ProductOffShelfView(APIView):
     permission_classes = [IsAuthenticated]
@@ -486,52 +473,9 @@ class AiAssistantView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        user = request.user
-        question = request.data.get('question', '')
+        from .commerce import assistant
+        return assistant(request._request)
 
-        biz_context = self._capture_business_context(user)
-
-        system_content = f"""
-        你是“智农参谋”AI 助手，服务于智慧农产品系统。
-        当前用户信息：
-        - 角色：{user.get_role_display()}
-        - 业务上下文：{biz_context}
-
-        你的职责：
-        - 用户为供应商时：基于竞品与销量信息给出定价、上架和质检建议。
-        - 用户为买家时：基于质检与推荐信息给出采购建议。
-        - 回复风格：专业、简洁、可执行。
-        """
-
-        try:
-            payload = {
-                "model": "deepseek-chat",
-                "messages": [
-                    {"role": "system", "content": system_content},
-                    {"role": "user", "content": question}
-                ],
-                "stream": False
-            }
-            headers = {
-                "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
-                "Content-Type": "application/json"
-            }
-
-            # 执行 10s 超时熔断
-            response = requests.post(
-                f"{settings.DEEPSEEK_BASE_URL}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=10
-            )
-
-            res_json = response.json()
-            answer = res_json['choices'][0]['message']['content']
-            return Response({"answer": answer})
-
-        except Exception as e:
-            print(f"DeepSeek 调用出错的具体原因：{e}")
-            return Response({"answer": "（智农大脑连接超时）系统已自动启动降级保护，建议稍后重试。"})
 
     def _capture_business_context(self, user):
         from django.db.models import Sum, Avg
@@ -562,33 +506,26 @@ class AiAssistantView(APIView):
 
         return f"{global_context} 当前市场供应充足，平台质检通过率较高。"
 
-# --- 全局加载 YOLOv5 模型（GPU 加速）---
-os.environ.setdefault('YOLOv5_AUTOINSTALL', 'false')
-os.environ.setdefault('YOLO_AUTOINSTALL', 'false')
-os.environ.setdefault('YOLO_CONFIG_DIR', str(settings.BASE_DIR.parent.parent / '.run' / 'ultralytics'))
-DEVICE = '0' if torch is not None and torch.cuda.is_available() else 'cpu'
-WEIGHTS_PATH = os.path.join(settings.BASE_DIR, 'best.pt')
-YOLOV5_LOCAL_DIR = os.path.join(settings.BASE_DIR.parent.parent, 'vendor', 'yolov5')
+# Optional image model is loaded only when a batch image is inspected.
+from functools import lru_cache
 
-model = None
-if torch is None:
-    print('Optional image inference disabled: install requirements-ai.txt to enable it')
-elif not os.path.exists(WEIGHTS_PATH):
-    print(f'Local model file not found: {WEIGHTS_PATH}')
-elif not os.path.isdir(YOLOV5_LOCAL_DIR):
-    print(f'Local yolov5 repo not found: {YOLOV5_LOCAL_DIR}')
-else:
+@lru_cache(maxsize=1)
+def get_vision_model():
+    weights = settings.BASE_DIR / 'best.pt'
+    source = settings.BASE_DIR.parent.parent / 'vendor' / 'yolov5'
+    if not weights.is_file() or not source.is_dir():
+        return None
     try:
-        model = torch.hub.load(
-            YOLOV5_LOCAL_DIR,
-            'custom',
-            path=WEIGHTS_PATH,
-            device=DEVICE,
-            source='local'
-        )
-        print(f'Loaded local model: {WEIGHTS_PATH}')
-    except Exception as e:
-        print(f'Failed to load local model: {e}')
+        import torch
+        os.environ.setdefault('YOLOv5_AUTOINSTALL', 'false')
+        os.environ.setdefault('YOLO_AUTOINSTALL', 'false')
+        os.environ.setdefault('YOLO_CONFIG_DIR', str(settings.BASE_DIR.parent.parent / '.run' / 'ultralytics'))
+        return torch.hub.load(str(source), 'custom', path=str(weights),
+            device='0' if torch.cuda.is_available() else 'cpu', source='local')
+    except (ImportError, OSError, RuntimeError):
+        return None
+
+model = None  # Legacy image endpoint is retired; batch endpoint uses the lazy loader.
 
 class QualityInspectionView(APIView):
     permission_classes = [IsAuthenticated]
@@ -644,9 +581,14 @@ class QualityInspectionView(APIView):
         })
 
 class QualityLogListView(generics.ListAPIView):
-    queryset = QualityInspectionLog.objects.all().order_by('-created_at')[:30]
     serializer_class = QualityLogSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        from .access import supplier_ids
+        qs=QualityInspectionLog.objects.all()
+        if self.request.user.role!='admin':qs=qs.filter(inspector_id__in=supplier_ids(self.request.user,'inspect'))
+        return qs.order_by('-created_at')[:30]
 
 class CommentListCreateView(APIView):
     permission_classes = [IsAuthenticatedOrReadOnly]
@@ -714,17 +656,6 @@ class CommentListCreateView(APIView):
         # 核心修复：增加最后的兜底返回，防止返回 NoneType
         return Response({"detail": "您的账号角色无法发布评论"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if user.role == 'purchaser':
-            if not parent_comment:
-                has_rated = ProductComment.objects.filter(product=product, user=user, rating__isnull=False).exists()
-                if has_rated and rating is not None:
-                    rating = None
-
-            comment = ProductComment.objects.create(
-                product=product, user=user, content=content,
-                rating=rating, is_seller_reply=False, parent=parent_comment
-            )
-            return Response(ProductCommentSerializer(comment, context={'request': request}).data)
 
 
 class CommentDeleteView(APIView):

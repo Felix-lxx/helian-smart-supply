@@ -23,7 +23,7 @@ from .models import (Product, Order, User, StockBatch, PurchaseDemand, DemandQuo
                      AllocationPlan, WorkspaceNotification, ShippingAddress, DeviceNode, CheckoutSubmission)
 from .commerce_rules import (price_for, json_price, assess, allocations_for, movement,
                              reopen_demand, public_weight, PURPOSES, FLEXIBLE, hard_quality_reason)
-from .access import supplier_ids
+from .access import supplier_ids, buyer_ids, participant_ids
 
 
 def number(value, minimum=Decimal('0'), maximum=Decimal('10000000')):
@@ -81,6 +81,10 @@ def notice(user, title, content='', route='/orders'):
 def event(order, user, title, note=''):
     order.events = [*(order.events or []), {'title': title, 'note': note,
                     'actor': user.username, 'time': timezone.now().isoformat()}]
+    from .models import BusinessEvent
+    from .coordination import sync_order_tasks
+    BusinessEvent.objects.create(order=order, actor=user, title=title[:160], note=note)
+    sync_order_tasks(order, user)
 
 
 def batch_data(b):
@@ -88,7 +92,9 @@ def batch_data(b):
     return {'id': b.id, 'product_id': b.product_id, 'product_name': b.product.name,
             'supplier': b.product.owner.username, 'supplier_id': b.product.owner_id,
             'code': b.code, 'quantity': float(b.quantity), 'reserved': float(b.reserved),
-            'available': float(available), 'unit': b.product.unit, 'price': float(b.product.retail_price),
+            'available': float(available), 'unit': b.product.unit, 'price': float(b.sale_price if b.sale_price is not None else b.product.retail_price),
+            'sale_price': float(b.sale_price) if b.sale_price is not None else None,
+            'intended_purpose': b.intended_purpose, 'parent_id': b.parent_id,
             'grade': b.grade, 'packaging': b.packaging, 'size_mm': b.size_mm,
             'harvest_date': b.harvest_date, 'available_date': b.available_date,
             'status': b.status, 'sample_size': b.sample_size, 'defect_count': b.defect_count,
@@ -118,9 +124,9 @@ def product_data(p, full=False):
     return data
 
 
-def order_data(o):
+def order_data(o, user=None):
     snap = o.snapshot or {}
-    return {'id': o.id, 'number': f'HL{o.created_at:%y%m%d}{o.id:05d}',
+    data = {'id': o.id, 'number': f'HL{o.created_at:%y%m%d}{o.id:05d}',
             'product_id': o.product_id, 'name': snap.get('name', o.product.name if o.product else '历史货品'),
             'image_url': snap.get('image_url', ''), 'supplier': snap.get('supplier', o.product.owner.username if o.product else ''),
             'buyer': o.user.username, 'buyer_id': o.user_id, 'quantity': float(o.quantity) if o.quantity is not None else None,
@@ -137,21 +143,50 @@ def order_data(o):
             'version': o.version, 'promised_date': o.promised_date,
             'dispatched_quantity': float(sum(a.dispatched for a in o.allocations.all())) if o.allocations.exists() else
                 (float(o.quantity or 0) if o.status in ['shipped','completed','issue'] else 0),
-            'deliveries': list(o.deliveries.order_by('id').values('id','quantity','carrier','tracking_number','status','receipt','created_at','received_at')),
+            'sheet_id': o.sheet_id, 'site_id': o.site_id, 'site': o.site.name if o.site else '',
+            'settlement_basis': o.settlement_basis, 'weight_tolerance_pct': float(o.weight_tolerance_pct),
+            'deliveries': list(o.deliveries.order_by('id').values('id','quantity','carrier','tracking_number','status','receipt','created_at','received_at','supplier_id','kind','physical_quantity','weighing','case_id')),
             'allocations': [{'id': a.id, 'batch_id': a.batch_id, 'batch_code': a.batch.code,
+                             'supplier_id': a.batch.product.owner_id, 'supplier': a.batch.product.owner.username,
                              'quantity': float(a.quantity), 'dispatched': float(a.dispatched),
                              'unit_price':float(a.unit_price),'pricing':a.terms}
                             for a in o.allocations.select_related('batch')],
-            'cases': list(o.cases.order_by('-id').values())}
+            'cases': list(o.cases.order_by('-id').values()),
+            'reconciliations': list(o.reconciliations.order_by('-id').values()),
+            'tasks': list(o.tasks.order_by('id').values('id', 'kind', 'status', 'supplier_id', 'assignee_id', 'version'))}
+    if user:
+        trade = user.role == 'admin' or (o.product and o.product.owner_id in supplier_ids(user, 'manage'))
+        dispatch_ids = supplier_ids(user, 'dispatch')
+        data['can_manage_trade'] = trade
+        data['can_receive'] = o.user_id in buyer_ids(user, 'receive')
+        available = [a for a in o.allocations.select_related('batch__product') if user.role == 'admin' or a.batch.product.owner_id in dispatch_ids]
+        data['fulfillable_quantity'] = float(sum(a.quantity-a.dispatched for a in available))
+        data['can_ship'] = bool(available) and not data['can_receive']
+        if user.role == 'supplier' and o.product.owner_id not in supplier_ids(user):
+            own = {a.id for a in available}
+            data['allocations'] = [a for a in data['allocations'] if a['id'] in own]
+            data['total_amount'] = float(sum(Decimal(str(a.terms.get('total', a.quantity*a.unit_price))) for a in available))
+            data['payment_reference'] = ''
+            data['cases'], data['reconciliations'] = [], []
+            data['quantity']=float(sum(a.quantity for a in available))
+            data['dispatched_quantity']=float(sum(a.dispatched for a in available))
+            data['unit_price']=float(sum(a.quantity*a.unit_price for a in available)/sum(a.quantity for a in available)) if any(a.quantity for a in available) else 0
+            data['snapshot']={k:v for k,v in snap.items() if k not in ['pricing','contract','recovery_delta']}
+            data['deliveries']=[d for d in data['deliveries'] if d['supplier_id'] in supplier_ids(user)]
+            data['tasks']=[t for t in data['tasks'] if t['supplier_id'] in supplier_ids(user)]
+            data['events'] = [e for e in data['events'] if '款' not in e['title'] and '对账' not in e['title']]
+    return data
 
 
 def demand_data(d, user):
+    from .decisions import remaining_demand, remaining_usable
     quotes = d.quotes.select_related('batch__product', 'supplier').all()
     if user.role == 'supplier':
-        quotes = quotes.filter(supplier=user)
+        quotes = quotes.filter(supplier_id__in=supplier_ids(user))
     accepted = sum(q.quantity-q.released_quantity for q in d.quotes.filter(status='accepted').exclude(order__status='cancelled'))
     return {'id': d.id, 'buyer': d.buyer.username, 'buyer_id': d.buyer_id, 'title': d.title,
-            'remaining': float(max(Decimal(0), d.quantity-accepted)),
+            'remaining': float(remaining_demand(d)),
+            'remaining_usable': float(remaining_usable(d)) if d.required_usable else None,
             'keyword': d.keyword, 'quantity': float(d.quantity), 'unit': d.unit, 'budget': float(d.budget),
             'min_size': d.min_size, 'grade': d.grade, 'packaging': d.packaging,
             'tolerance': d.tolerance, 'deadline': d.deadline, 'destination': d.destination,
@@ -159,6 +194,9 @@ def demand_data(d, user):
             'is_demo': d.is_demo, 'created_at': d.created_at, 'purpose': d.purpose,
             'flexible_fields': d.flexible_fields, 'priority': d.priority,
             'arrival_window': d.arrival_window, 'version': d.version,
+            'sheet_id': d.sheet_id, 'site_id': d.site_id, 'site': d.site.name if d.site else '',
+            'required_usable': float(d.required_usable) if d.required_usable is not None else None,
+            'process': d.process,
             'quotes': [{'id': q.id, 'supplier': q.supplier.username, 'batch_code': q.batch.code,
                         'price': float(q.price), 'quantity': float(q.quantity), 'note': q.note,
                         'status': q.status, 'order_id': q.order_id, 'expires_at': q.expires_at,
@@ -166,9 +204,9 @@ def demand_data(d, user):
 
 
 def visible_orders(user):
-    qs = Order.objects.select_related('product__owner', 'user', 'batch')
+    qs = Order.objects.select_related('product__owner', 'user', 'batch', 'site', 'sheet')
     if user.role != 'admin':
-        qs = qs.filter(product__owner_id__in=supplier_ids(user)) if user.role == 'supplier' else qs.filter(user=user)
+        qs = qs.filter(Q(product__owner_id__in=supplier_ids(user)) | Q(allocations__batch__product__owner_id__in=supplier_ids(user))).distinct() if user.role == 'supplier' else qs.filter(user_id__in=buyer_ids(user))
     return qs.order_by('-created_at')
 
 
@@ -177,7 +215,7 @@ def stock_sync(p):
     p.save(update_fields=['stock', 'updated_at'])
 
 
-def create_order(user, batch, qty, price=None, address=None):
+def create_order(user, batch, qty, price=None, address=None, site=None, sheet=None, settlement_basis='contract', weight_tolerance=0, promised_date=None):
     if hard_quality_reason(batch):raise ValidationError(hard_quality_reason(batch))
     if batch.status != 'released' or batch.product.status != 'on_sale' or batch.product.is_deleted:
         raise ValidationError('该批次尚未放行或商品已下架')
@@ -186,7 +224,7 @@ def create_order(user, batch, qty, price=None, address=None):
     p = batch.product
     if qty < p.min_order:
         raise ValidationError(f'起订量为 {p.min_order}{p.unit}')
-    costs = price_for(p, qty, price)
+    costs = price_for(p, qty, price, batch=batch)
     unit_price = costs['unit_price']
     snap = {'name': p.name, 'unit': p.unit, 'grade': batch.grade, 'packaging': batch.packaging,
             'size_mm': batch.size_mm, 'origin': p.origin, 'supplier': p.owner.username,
@@ -198,7 +236,8 @@ def create_order(user, batch, qty, price=None, address=None):
         unit_price_at_purchase=unit_price, total_amount=costs['total'],
         snapshot=snap, status='pending', receiver_name=str(addr.get('receiver_name', ''))[:50],
         receiver_phone=str(addr.get('receiver_phone', ''))[:20], address_info=str(addr.get('address', ''))[:1000],
-        is_demo=p.is_demo)
+        is_demo=p.is_demo, site=site, sheet=sheet, promised_date=promised_date,
+        settlement_basis=settlement_basis, weight_tolerance_pct=weight_tolerance)
     event(o, user, '订单已创建', '库存已预留，待确认收款；24小时未付款自动释放')
     o.save(update_fields=['events'])
     batch.reserved += qty
@@ -253,7 +292,7 @@ def bootstrap(request):
         batches = batches.filter(product__status='on_sale', status='released')
     demands = PurchaseDemand.objects.select_related('buyer').order_by('-created_at')
     if u.role == 'retail':
-        demands = demands.filter(buyer=u)
+        demands = demands.filter(buyer_id__in=buyer_ids(u))
     notifications = list(u.workspace_notifications.order_by('-created_at')[:30].values())
     from .reporting import report_counts
     summary=report_counts(u,weekly=True)
@@ -266,11 +305,12 @@ def bootstrap(request):
     plans = AllocationPlan.objects.all() if u.role == 'admin' else AllocationPlan.objects.filter(owner=u)
     return Response({'user': {'id': u.id, 'username': u.username, 'role': u.role,
                      'phone': u.phone, 'avatar': request.build_absolute_uri(u.avatar.url) if u.avatar else None,
-                     'managed_supplier_ids':list(supplier_ids(u,'manage')),
+                     'managed_supplier_ids':list(participant_ids(u,'manage')),
+                     'managed_buyer_ids':list(buyer_ids(u,'manage')),
                      'dispatch_supplier_ids':list(supplier_ids(u,'dispatch')),
                      'inspect_supplier_ids':list(supplier_ids(u,'inspect'))},
         'products': [product_data(p, True) for p in products_qs],
-        'batches': [batch_data(b) for b in batches], 'orders': [order_data(o) for o in orders],
+        'batches': [batch_data(b) for b in batches], 'orders': [order_data(o,u) for o in orders],
         'demands': [demand_data(d, u) for d in demands[:200]],
         'notifications': notifications,
         'plans': [{'id':p.id,'name':p.name,'mode':p.mode,'status':p.status,
@@ -303,15 +343,26 @@ def checkout(request):
     if not isinstance(addr, dict) or not all(str(addr.get(k, '')).strip() for k in ['receiver_name', 'receiver_phone', 'address']):
         raise ValidationError('请填写完整收货信息')
     created = []
+    from .fulfilment_api import site_for
+    site = site_for(request.user, request.data.get('site_id'), 'manage')
+    buyer = site.company.owner if site else request.user
+    basis = request.data.get('settlement_basis', 'contract')
+    if basis not in ['contract', 'accepted_weight']:
+        raise ValidationError('结算方式不正确')
+    tolerance = number(request.data.get('weight_tolerance_pct', 0), maximum=10)
+    promised = day(request.data.get('promised_date'))
+    if promised and promised < timezone.localdate():
+        raise ValidationError('到货日期不能早于今天')
     with transaction.atomic():
         key = str(request.data.get('idempotency_key', ''))[:80]
         if len(key) < 12: raise ValidationError('缺少采购提交标识，请刷新清单后重试')
-        digest = hashlib.sha256(json.dumps({'items': items, 'address': addr}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        digest = hashlib.sha256(json.dumps({'items': items, 'address': addr, 'site': site.id if site else None,
+            'basis': basis, 'tolerance': str(tolerance), 'date': str(promised)}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         receipt, new = CheckoutSubmission.objects.get_or_create(user=request.user, key=key, defaults={'payload_hash': digest})
         receipt = CheckoutSubmission.objects.select_for_update().get(pk=receipt.pk)
         if not new:
             if receipt.payload_hash != digest: raise ValidationError('清单内容已变化，请刷新后重新提交')
-            return Response({'orders': [order_data(o) for o in visible_orders(request.user).filter(pk__in=receipt.orders)]})
+            return Response({'orders': [order_data(o,request.user) for o in visible_orders(request.user).filter(pk__in=receipt.orders)]})
         # Validate the same server-generated pricing the buyer just reviewed.
         if request.data.get('pricing_signature'):
             from .collaboration_api import pricing_signature
@@ -327,9 +378,26 @@ def checkout(request):
             if not batch:
                 raise ValidationError('批次不存在')
             qty = number(item.get('quantity'), Decimal('.01'))
-            created.append(create_order(request.user, batch, qty, address=addr))
+            earliest = max(batch.available_date or timezone.localdate(),timezone.localdate())+timedelta(days=batch.product.delivery_days)
+            if promised and promised < earliest:
+                raise ValidationError(f'{batch.code} 最早预计 {earliest} 到货，请调整约定日期')
+            if basis == 'accepted_weight' and batch.product.unit not in ['kg', '斤']:
+                raise ValidationError('按合格实重结算需选择重量单位商品')
+            order=create_order(buyer, batch, qty, address=addr, site=site,
+                settlement_basis=basis, weight_tolerance=tolerance, promised_date=promised or earliest)
+            if item.get('required_usable'):
+                from .coordination import yield_data
+                evidence=yield_data(batch,item.get('purpose','kitchen'),str(item.get('process','')))
+                target=number(item['required_usable'],Decimal('.01'))
+                if not evidence or evidence['id']!=item.get('yield_record_id') or Decimal(str(evidence['rate']))*qty+Decimal('.005')<target:
+                    raise ValidationError('用途称重依据、数量或净需求已变化，请重新比较后采购')
+                order.snapshot={**order.snapshot,'purpose':item.get('purpose'),'contract':{
+                    'required_usable':float(target),'yield_rate':evidence['rate'],'yield_record_id':evidence['id'],
+                    'process':evidence['process'],'evidence_scope':evidence['scope']}}
+                order.save(update_fields=['snapshot'])
+            created.append(order)
         receipt.orders = [o.id for o in created]; receipt.save(update_fields=['orders'])
-    return Response({'orders': [order_data(o) for o in created]}, status=201)
+    return Response({'orders': [order_data(o, request.user) for o in created]}, status=201)
 
 
 @api_view(['POST'])
@@ -343,7 +411,7 @@ def order_action(request, pk, action):
         o = visible_orders(u).select_for_update().filter(pk=pk).first()
         if not o:
             raise NotFound('订单不存在或不属于当前账号')
-        buyer = o.user_id == u.id
+        buyer = o.user_id in buyer_ids(u, 'manage')
         seller = u.role == 'admin' or (o.product and o.product.owner_id in supplier_ids(u,'manage'))
         if action == 'cancel':
             if not buyer or o.status != 'pending' or o.payment_status != 'unpaid':
@@ -375,67 +443,9 @@ def order_action(request, pk, action):
             event(o, u, '付款核对未通过', str(request.data.get('note', '请核实流水号后重新提交'))[:500])
             o.save()
             notice(o.user, f'订单 #{o.id} 请重新核实付款')
-        elif action == 'ship':
-            if not seller or o.status != 'paid' or not o.batch_id:
-                raise ValidationError('只能发运已收款且已分配批次的订单')
-            if not request.data.get('carrier') or not request.data.get('tracking_number'):
-                raise ValidationError('请填写承运方及运单号/配送单号')
-            b = StockBatch.objects.select_for_update().get(pk=o.batch_id)
-            if b.status != 'released' or b.quantity < o.quantity or b.reserved < o.quantity:
-                raise ValidationError('批次待检或库存异常，请先完成复核与调配')
-            b.quantity -= o.quantity
-            b.reserved -= o.quantity
-            b.save()
-            stock_sync(b.product)
-            o.carrier = str(request.data['carrier'])[:100]
-            o.tracking_number = str(request.data['tracking_number'])[:100]
-            o.status = 'shipped'
-            event(o, u, '订单已发运', f'{o.carrier} · {o.tracking_number}')
-            o.save()
-            notice(o.user, f'订单 #{o.id} 已发运')
-        elif action == 'receive':
-            if not buyer or o.status != 'shipped':
-                raise ValidationError('只有买方可以验收在途订单')
-            if o.quantity is None:
-                raise ValidationError('旧版订单缺少采购数量，请先与供货方核实，不自动补造记录')
-            accepted = number(request.data.get('accepted_quantity'), Decimal(0), o.quantity)
-            o.accepted_quantity = accepted
-            if accepted < o.quantity:
-                issue = str(request.data.get('note', '')).strip()
-                if not issue:
-                    raise ValidationError('部分验收请填写数量差异或质量问题')
-                o.status, o.issue = 'issue', issue[:2000]
-                event(o, u, '验收存在差异', f'接收 {accepted}/{o.quantity}{o.snapshot.get("unit", "")}；{issue}')
-                notice(o.product.owner, f'订单 #{o.id} 存在验收差异')
-            else:
-                o.status = 'completed'
-                event(o, u, '买方验收完成', f'接收 {accepted}{o.snapshot.get("unit", "")}')
-                if o.product:
-                    Product.objects.filter(pk=o.product_id).update(sales_count=F('sales_count')+int(accepted))
-                notice(o.product.owner, f'订单 #{o.id} 验收完成')
-            o.save()
-        elif action == 'resolve':
-            if not seller or o.status != 'issue':
-                raise ValidationError('当前订单没有待处理差异')
-            note = str(request.data.get('note', '')).strip()
-            if not note:
-                raise ValidationError('请填写协商处理方案')
-            o.resolution = note[:2000]
-            event(o, u, '供应方提出处理方案', note)
-            o.save()
-            notice(o.user, f'订单 #{o.id} 请确认处理方案')
-        elif action == 'accept-resolution':
-            if not buyer or o.status != 'issue' or not o.resolution:
-                raise ValidationError('没有可确认的处理方案')
-            o.status = 'completed'
-            event(o, u, '双方确认差异处理完成', o.resolution)
-            o.save()
-            if o.product:
-                Product.objects.filter(pk=o.product_id).update(sales_count=F('sales_count')+int(o.accepted_quantity or 0))
-            notice(o.product.owner, f'订单 #{o.id} 差异处理已确认')
         else:
             raise ValidationError('不支持的订单操作')
-    return Response(order_data(o))
+    return Response(order_data(o,request.user))
 
 
 @api_view(['POST'])
@@ -578,9 +588,11 @@ def create_demand(request):
     if not deadline or deadline < timezone.localdate():
         raise ValidationError('到货日期不能早于今天')
     unit = str(d.get('unit', 'kg'))
+    from .fulfilment_api import site_for
+    site = site_for(request.user, d.get('site_id'), 'manage')
     if unit not in ['kg', '斤', '箱', '件']:
         raise ValidationError('计量单位不正确')
-    demand = PurchaseDemand.objects.create(buyer=request.user, title=str(d['title'])[:160], keyword=str(d['keyword'])[:80],
+    demand = PurchaseDemand.objects.create(buyer=site.company.owner if site else request.user, site=site, title=str(d['title'])[:160], keyword=str(d['keyword'])[:80],
         quantity=number(d.get('quantity'), Decimal('.01')), budget=number(d.get('budget'), Decimal('.01')),
         unit=unit, min_size=integer(d.get('min_size', 0), 0, 2000), grade=str(d.get('grade', ''))[:30],
         packaging=str(d.get('packaging', ''))[:80], tolerance=float(number(d.get('tolerance', 10), Decimal(0), Decimal(100))),
@@ -600,14 +612,22 @@ def quote_demand(request, pk):
     d = PurchaseDemand.objects.filter(pk=pk, status='open', deadline__gte=timezone.localdate()).first()
     b = StockBatch.objects.select_related('product__owner').filter(pk=request.data.get('batch_id'), product__owner_id__in=supplier_ids(request.user,'manage')).first()
     if not d or not b: raise ValidationError('需求已关闭或批次不可用')
-    qty = number(request.data.get('quantity'), Decimal('.01'), min(d.quantity, b.quantity-b.reserved))
+    if d.sheet and d.sheet.cutoff_at and d.sheet.cutoff_at < timezone.now():
+        raise ValidationError('该采购单已过截单时间，请采购方重新发布')
+    qty = number(request.data.get('quantity'), Decimal('.01'), b.quantity-b.reserved if d.required_usable else min(d.quantity, b.quantity-b.reserved))
     price = number(request.data.get('price'), Decimal('.01'))
     deviations = assess(b, d, qty, price)
     if any(not x['negotiable'] for x in deviations):
         raise ValidationError('；'.join(x['reason'] for x in deviations if not x['negotiable']))
     note = str(request.data.get('note', '')).strip()
     if deviations and not note: raise ValidationError('偏离可协商条件时请说明替代依据')
-    terms = json_price(price_for(b.product, qty, price))
+    terms = json_price(price_for(b.product, qty, price, batch=b))
+    if d.required_usable:
+        from .coordination import yield_data
+        evidence = yield_data(b, d.purpose, d.process)
+        if not evidence or evidence['rate'] <= 0:
+            raise ValidationError('请先补充该用途和加工方式的称重依据')
+        terms.update({'yield_rate': evidence['rate'], 'yield_record_id': evidence['id'], 'committed_usable': float(qty)*evidence['rate']})
     q = DemandQuote.objects.create(demand=d, batch=b, supplier=b.product.owner, price=price, quantity=qty,
         note=note[:2000], deviations=deviations, terms=terms, expires_at=timezone.now()+timedelta(hours=24))
     notice(d.buyer, f'需求「{d.title}」收到新报价', f'{request.user.username} 已报价', f'/demands?demand={d.id}')
@@ -619,13 +639,25 @@ def quote_demand(request, pk):
 def accept_quote(request, pk):
     role(request.user, 'retail')
     with transaction.atomic():
-        q = DemandQuote.objects.select_for_update().select_related('demand', 'batch__product__owner').filter(pk=pk, demand__buyer=request.user).first()
+        q = DemandQuote.objects.select_for_update().select_related('demand', 'batch__product__owner').filter(pk=pk, demand__buyer_id__in=buyer_ids(request.user,'manage')).first()
         if not q or q.status != 'pending': raise ValidationError('报价不存在或已处理')
         if q.expires_at and q.expires_at < timezone.now(): raise ValidationError('报价已过期，请联系供应商重新报价')
         d = PurchaseDemand.objects.select_for_update().get(pk=q.demand_id)
         if d.status != 'open' or d.deadline < timezone.localdate(): raise ValidationError('需求已关闭或交期已过')
+        if d.sheet and d.sheet.cutoff_at and d.sheet.cutoff_at < timezone.now():
+            raise ValidationError('采购单已过截单时间，请核对交期后重新发布')
         remaining = d.quantity-sum(x.quantity-x.released_quantity for x in d.quotes.filter(status='accepted').exclude(order__status='cancelled'))
         qty = min(q.quantity, remaining)
+        if d.required_usable:
+            from .decisions import remaining_usable
+            rate = Decimal(str(q.terms.get('yield_rate', 0)))
+            if rate <= 0:
+                raise ValidationError('净用量报价缺少称重承诺，请供货方重新报价')
+            if remaining_usable(d) <= 0:
+                raise ValidationError('净用量需求已被满足')
+            if q.quantity*rate > remaining_usable(d)+q.batch.product.quantity_step*rate+Decimal('.005'):
+                raise ValidationError('其他报价已覆盖部分净用量，请供货方按剩余缺口重新报价')
+            qty = q.quantity
         if qty <= 0: raise ValidationError('需求已被满足')
         b = StockBatch.objects.select_for_update().select_related('product__owner').get(pk=q.batch_id)
         deviations = assess(b, d, qty, q.price)
@@ -638,17 +670,24 @@ def accept_quote(request, pk):
         contact = ShippingAddress.objects.filter(user=request.user).order_by('-is_default', '-id').first()
         phone = request.user.phone or (contact.receiver_phone if contact else '')
         if not phone: raise ValidationError('请先在账户设置中补充联系电话或收货地址')
-        o = create_order(request.user, b, qty, q.price, {'receiver_name': contact.receiver_name if contact else request.user.username,
-            'receiver_phone': phone, 'address': d.destination})
+        o = create_order(d.buyer, b, qty, q.price, {'receiver_name': contact.receiver_name if contact else request.user.username,
+            'receiver_phone': phone, 'address': d.destination}, site=d.site, sheet=d.sheet,
+            promised_date=d.deadline)
         o.promised_date=d.deadline
         o.snapshot={**o.snapshot,'demand_id':d.id,'purpose':d.purpose,'arrival_window':d.arrival_window,
             'contract':{'keyword':d.keyword,'grade':d.grade,'packaging':d.packaging,'min_size':d.min_size,
-                'tolerance':d.tolerance,'deadline':d.deadline.isoformat(),'deviations':deviations}}
+                'tolerance':d.tolerance,'deadline':d.deadline.isoformat(),'deviations':deviations,
+                'required_usable':float(d.required_usable) if d.required_usable else None,
+                'yield_rate':q.terms.get('yield_rate'), 'yield_record_id':q.terms.get('yield_record_id'), 'process':d.process}}
         o.save()
         q.status, q.order, q.quantity = 'accepted', o, qty; q.save()
-        d.status = 'ordered' if qty >= remaining else 'open'; d.version+=1;d.save()
+        if d.required_usable:
+            d.status = 'ordered' if remaining_usable(d) < Decimal('.005') else 'open'
+        else:
+            d.status = 'ordered' if qty >= remaining else 'open'
+        d.version+=1;d.save()
         if d.status == 'ordered': d.quotes.filter(status='pending').exclude(pk=q.pk).update(status='closed')
-    return Response(order_data(o))
+    return Response(order_data(o,request.user))
 
 
 def compatibility(b, d, robust=False):
@@ -696,8 +735,13 @@ def publish_plan(request, pk):
             if not d or assess(b,d,qty,number(item['price']),plan.mode=='robust') or b.quantity-b.reserved < qty:
                 raise ValidationError('库存或需求已变化，请重新计算方案')
             from .decisions import remaining_demand
-            if qty>remaining_demand(d):raise ValidationError('需求余量已变化，请重新计算方案')
-            terms=json_price(price_for(b.product,qty,number(item['price'])))
+            if not d.required_usable and qty>remaining_demand(d):raise ValidationError('需求余量已变化，请重新计算方案')
+            terms=json_price(price_for(b.product,qty,number(item['price']),batch=b))
+            if d.required_usable:
+                from .coordination import yield_data
+                evidence=yield_data(b,d.purpose,d.process)
+                if not evidence:raise ValidationError('用途称重依据已变化，请重新试算')
+                terms.update({'yield_rate':evidence['rate'],'yield_record_id':evidence['id'],'committed_usable':float(qty)*evidence['rate']})
             if Decimal(str(terms['total']))!=Decimal(str(item['amount'])):
                 raise ValidationError('方案价格或费用已变化，请重新计算后再发送')
             DemandQuote.objects.create(demand=d, batch=b, supplier=b.product.owner, price=number(item['price']),
@@ -755,7 +799,7 @@ def users_api(request):
 def demo_login(request):
     if not settings.DEBUG: raise PermissionDenied('演示入口仅在本地开发环境开启')
     selected = request.data.get('role')
-    names = {'retail': 'demo_buyer', 'supplier': 'demo_supplier', 'admin': 'demo_admin'}
+    names = {'retail': 'demo_buyer', 'supplier': 'demo_supplier', 'admin': 'demo_admin', 'cooperative':'demo_coop'}
     if selected not in names: raise ValidationError('请选择演示身份')
     u = User.objects.filter(username=names[selected], is_active=True).first()
     if not u: raise ValidationError('演示数据尚未初始化，请联系管理员')
@@ -788,7 +832,8 @@ def upload_image(request):
 def batch_vision(request, pk):
     from PIL import Image, UnidentifiedImageError
     from django.core.files.storage import default_storage
-    from .views import model
+    from .views import get_vision_model
+    model = get_vision_model()
     from .models import QualityInspectionLog
     role(request.user, 'supplier', 'admin')
     qs = StockBatch.objects.select_related('product').filter(pk=pk)

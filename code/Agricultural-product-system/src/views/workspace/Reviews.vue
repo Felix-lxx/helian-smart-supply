@@ -17,6 +17,8 @@ const task = reactive({
   batch_id: null,
   metric: 'appearance',
   target_sample: 50,
+  estimated_minutes: 15,
+  sample_cost: undefined,
   note: '',
   position: '',
 })
@@ -51,7 +53,13 @@ async function load() {
 function schedule(id) {
   task.batch_id = id
   task.metric = 'appearance'
-  task.target_sample = 50
+  task.target_sample = Math.max(
+    50,
+    Math.min(
+      100000,
+      priorities.value.find((p) => p.batch_id === id)?.minimum_zero_defect_sample || 50,
+    ),
+  )
   task.note = ''
   task.position = ''
   creating.value = true
@@ -96,7 +104,7 @@ onMounted(load)
       <div>
         <h2>{{ openTasks.length }} 项复检待执行</h2>
         <p>
-          排序依据是受影响需求的优先级与外观区间宽度。每次复检独立保留样本记录，不把连续选择性复查当作固定置信保证。
+          排序综合受影响采购预算、交期紧迫度、证据区间与预计检查耗时。每次复检独立保留样本记录，不把连续选择性复查当作固定置信保证。
         </p>
       </div>
     </div>
@@ -194,6 +202,16 @@ onMounted(load)
                 }}</span
               ><span>可用 {{ qty(batch.available) }} {{ batch.unit }}</span>
             </div>
+            <div class="review-decision-facts">
+              <span v-for="(amount, u) in active.influence_by_unit" :key="u"
+                >可能影响 {{ qty(amount) }} {{ u }}</span
+              >
+              <span>预计检查 {{ active.estimated_minutes }} 分钟</span>
+              <span v-if="active.minimum_zero_defect_sample"
+                >零缺陷时至少
+                {{ active.minimum_zero_defect_sample }} 个样本才可能低于当前最严阈值</span
+              >
+            </div>
             <p class="data-note">
               {{ active.reason }}。区间只针对代表性外观抽样，不等同于食品安全结论。
             </p>
@@ -269,7 +287,13 @@ onMounted(load)
               :label="v" /></el-select></el-form-item
         ><el-form-item label="计划抽样数 / 个"
           ><el-input-number v-model="task.target_sample" :min="1" :max="100000" /></el-form-item
-        ><el-form-item label="抽样位置或箱次"
+        ><el-form-item label="预计检查分钟"
+          ><el-input-number v-model="task.estimated_minutes" :min="1" :max="1440"
+        /></el-form-item>
+        <el-form-item label="本次抽样成本 / 元（可选）"
+          ><el-input-number v-model="task.sample_cost" :min="0" :precision="2"
+        /></el-form-item>
+        <el-form-item label="抽样位置或箱次"
           ><el-input
             v-model="task.position"
             placeholder="例如前、中、后段各随机选取包装" /></el-form-item
@@ -320,3 +344,20 @@ onMounted(load)
     >
   </div>
 </template>
+<style scoped>
+.review-decision-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 18px 0;
+}
+.review-decision-facts > span {
+  padding: 10px 13px;
+  background: #f1f5fd;
+  border: 1px solid #e2eafa;
+  color: #3b5b83;
+  border-radius: 7px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+</style>

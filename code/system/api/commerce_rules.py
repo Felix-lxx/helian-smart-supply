@@ -20,13 +20,14 @@ def hard_quality_reason(batch):
     return ''
 
 
-def price_for(product, quantity, override=None):
+def price_for(product, quantity, override=None, batch=None):
     q = Decimal(str(quantity))
     step = Decimal(str(product.quantity_step))
     if q <= 0 or q < product.min_order or (step and q % step):
         raise ValidationError(f'起订 {product.min_order}{product.unit}，增量为 {step}{product.unit}')
-    unit = Decimal(str(override if override is not None else product.retail_price))
-    if override is None:
+    batch_price = batch.sale_price if batch is not None else None
+    unit = Decimal(str(override if override is not None else batch_price if batch_price is not None else product.retail_price))
+    if override is None and batch_price is None:
         for t in sorted(product.price_tiers.all(),key=lambda t:t.min_quantity):
             if q >= t.min_quantity:
                 unit = Decimal(str(t.wholesale_price))
@@ -51,12 +52,17 @@ def assess(batch, demand, quantity=None, unit_price=None, robust=False):
                        'negotiable': key in FLEXIBLE and key in demand.flexible_fields})
     if demand.keyword.lower() not in (p.name+' '+p.variety).lower(): add('keyword', '采购品种不符')
     if p.unit != demand.unit: add('unit', '计量单位不同，未自动换算')
+    if getattr(demand, 'required_usable', None):
+        from .coordination import yield_data
+        evidence = yield_data(batch, demand.purpose, getattr(demand, 'process', ''))
+        if not evidence or evidence['rate'] <= 0:
+            add('yield', '缺少对应用途与加工方式的称重依据')
     if batch.size_mm < demand.min_size: add('size', f'尺寸低于 {demand.min_size}mm')
     if demand.grade and batch.grade != demand.grade: add('grade', '等级不符')
     if demand.packaging and batch.packaging != demand.packaging: add('packaging', '包装不符')
     q = quantity or max(Decimal(p.min_order), min(demand.quantity, max(Decimal(0), batch.quantity-batch.reserved)))
     try:
-        cost = price_for(p, q, unit_price)
+        cost = price_for(p, q, unit_price, batch=batch)
         if cost['unit_price'] > demand.budget: add('budget', '商品单价超预算')
     except ValidationError:
         add('quantity', '数量不满足起订量或包装增量')

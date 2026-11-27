@@ -23,7 +23,7 @@ const states = {
   confirmed: '已核对完成',
   rejected: '未接受',
 }
-const buyer = computed(() => props.order.buyer_id === w.state.user.id),
+const buyer = computed(() => (w.state.user.managed_buyer_ids || [w.state.user.id]).includes(props.order.buyer_id)),
   seller = computed(
     () =>
       w.isAdmin ||
@@ -35,10 +35,10 @@ const active = computed(() =>
   props.order.cases?.some((c) => !['confirmed', 'rejected'].includes(c.status)),
 )
 function canExecute(c) {
-  return c.status === 'accepted' && (c.kind === 'supplement' ? buyer.value : seller.value)
+  return c.status === 'accepted' && (['supplement','return'].includes(c.kind) ? buyer.value : seller.value)
 }
 function canConfirm(c) {
-  return c.status === 'executed' && (c.kind === 'supplement' ? seller.value : buyer.value)
+  return c.status === 'executed' && (['supplement','return'].includes(c.kind) ? seller.value : buyer.value)
 }
 async function propose() {
   busy.value = true

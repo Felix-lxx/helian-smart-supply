@@ -334,7 +334,10 @@ onMounted(() => calculate())
           label="分配量"
           width="120"
           ><template #default="{ row }"
-            >{{ qty(row.quantity) }} {{ row.unit }}</template
+            >{{ qty(row.quantity) }} {{ row.unit
+            }}<small v-if="row.usable_quantity != null" class="data-note" style="display: block"
+              >预计可用 {{ qty(row.usable_quantity) }} {{ row.unit }}</small
+            ></template
           ></el-table-column
         ><el-table-column label="单价" width="110"
           ><template #default="{ row }">¥{{ money(row.price) }}</template></el-table-column
@@ -415,7 +418,9 @@ onMounted(() => calculate())
               <h3>{{ s.title }}</h3>
               <p>已覆盖 {{ qty(s.filled) }} / {{ qty(s.quantity) }} {{ s.unit }}</p>
             </div>
-            <b class="warn small">缺 {{ qty(s.remaining) }} {{ s.unit }}</b>
+            <b class="warn small"
+              >{{ s.is_net ? '净用量缺口' : '缺' }} {{ qty(s.remaining) }} {{ s.unit }}</b
+            >
           </div>
           <div
             v-if="result && !result.shortfalls.some((s) => s.remaining > 0.01)"

@@ -4,6 +4,8 @@
 
 | 组件 | 来源 / 本地位置 | 许可与说明 |
 | --- | --- | --- |
+| Geeker-Admin 数据大屏参考 | [HalseySpicy/Geeker-Admin](https://github.com/HalseySpicy/Geeker-Admin)，固定提交 `ad08fdd1c08bfd2390a85fbbb359be17e2bdaae9`；来源保存在 `vendor/geeker-admin/` | MIT；保留 [上游许可证](vendor/geeker-admin/LICENSE) 和 [改造说明](vendor/geeker-admin/NOTICE.md)。当前布局已重新组织；不再引用的应用内标题素材已清理。 |
+| qrcode | 前端 `qrcode@1.5.4`，通过 npm 安装 | MIT；用于生成关联实际任务的二维码，依赖与版本保留在锁文件中。 |
 | YOLOv5 | `vendor/yolov5/`；上游 `ultralytics/yolov5` | 随附 [AGPL-3.0 许可证](vendor/yolov5/LICENSE)，基准提交和省略资源见 [vendor 说明](vendor/README.md)。使用、修改、分发或提供网络服务时需核对其完整条款及对集成部分的影响。 |
 | Vue、Vite、Element Plus、Pinia、ECharts、Leaflet 等 | 前端 `package.json` / `package-lock.json` | 依赖通过 npm 安装；其许可证以各发布包内容为准。 |
 | Django、DRF、SciPy、NumPy、PyTorch 等 | `requirements.txt` / `requirements-ai.txt` | 依赖通过 pip 安装；可选 AI 依赖与基础业务依赖分开。许可证以各发布包内容为准。 |

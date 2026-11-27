@@ -7,6 +7,7 @@ const props = defineProps({
   height: { type: String, default: '400px' },
   selected: Number,
   dark: Boolean,
+  links: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['select'])
 const root = ref()
@@ -53,25 +54,44 @@ function draw() {
         layoutCenter: ['50%', '51%'],
         layoutSize: '98%',
         itemStyle: {
-          areaColor: props.dark ? '#244a3d' : '#e8efea',
-          borderColor: props.dark ? '#4b6d5b' : '#fff',
+          areaColor: props.dark ? '#193c5b' : '#e8efea',
+          borderColor: props.dark ? '#3c678a' : '#fff',
           borderWidth: 1,
         },
         emphasis: {
           label: { show: false },
-          itemStyle: { areaColor: props.dark ? '#365f49' : '#cfdfd2' },
+          itemStyle: { areaColor: props.dark ? '#2f6487' : '#cfdfd2' },
         },
         label: { show: false },
       },
       series: [
+        {
+          type: 'lines',
+          coordinateSystem: 'geo',
+          silent: true,
+          z: 2,
+          data: props.links
+            .map((link) => {
+              const from = props.products.find((p) => p.id === link.source),
+                to = props.products.find((p) => p.id === link.target)
+              return from?.coords && to?.coords
+                ? {
+                    coords: [from.coords, to.coords],
+                    lineStyle: { color: link.status === 'issue' ? '#d9a453' : '#55b3d5' },
+                  }
+                : null
+            })
+            .filter(Boolean),
+          lineStyle: { width: 1.5, opacity: 0.65, type: 'dashed', curveness: 0.15 },
+        },
         {
           type: 'scatter',
           coordinateSystem: 'geo',
           data: points,
           symbolSize: (p) => Math.min(20, 9 + Math.sqrt(p[2] || 0) / 4),
           itemStyle: {
-            color: props.dark ? '#d1e8a9' : '#248363',
-            borderColor: props.dark ? '#9fbf7e' : '#fff',
+            color: props.dark ? '#61d5d2' : '#248363',
+            borderColor: props.dark ? '#cbf3ff' : '#fff',
             borderWidth: 2,
           },
           emphasis: { scale: 1.5 },
@@ -93,7 +113,7 @@ onMounted(() => {
   observer = new ResizeObserver(() => chart?.resize())
   observer.observe(root.value)
 })
-watch(() => [props.products, props.dark, props.selected], draw, { deep: true })
+watch(() => [props.products, props.dark, props.selected, props.links], draw, { deep: true })
 onBeforeUnmount(() => {
   observer?.disconnect()
   chart?.dispose()

@@ -21,6 +21,7 @@
     "leaflet": "^1.9.4",
     "marked": "^18.0.2",
     "pinia": "^3.0.4",
+    "qrcode": "^1.5.4",
     "vue": "beta",
     "vue-router": "^5.0.2"
   },

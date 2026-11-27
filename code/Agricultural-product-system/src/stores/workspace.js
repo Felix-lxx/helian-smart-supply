@@ -109,6 +109,7 @@ export const useWorkspace = defineStore('workspace', () => {
       // A poll started before this write may still carry the previous state.
       if (inflight) await inflight
       await refresh(true)
+      window.dispatchEvent(new CustomEvent('hl-business-change'))
       return r.data
     } catch (e) {
       const d = e.response?.data
@@ -124,7 +125,7 @@ export const useWorkspace = defineStore('workspace', () => {
   function persistCart() {
     localStorage.setItem(`hl-cart-${localStorage.getItem('user_id')}`, JSON.stringify(cart.value))
   }
-  function addCart(p, b, n) {
+  function addCart(p, b, n, meta = {}) {
     n = Number(n)
     const step = Number(p.quantity_step || 1)
     if (
@@ -139,7 +140,15 @@ export const useWorkspace = defineStore('workspace', () => {
       return false
     }
     const old = cart.value.find((x) => x.batch_id === b.id)
-    if (old) old.quantity = Math.min(b.available, old.quantity + n)
+    if (old && (old.purpose || meta.purpose) && (old.purpose !== meta.purpose || old.process !== meta.process || old.yield_record_id !== meta.yield_record_id)) {
+      ElMessage.warning('该批次已使用另一采购口径加入清单，请先核对或移除原明细')
+      return false
+    }
+    if (old) {
+      if (old.quantity+n>b.available) { ElMessage.warning('合并后的采购量超过可售库存'); return false }
+      old.quantity += n
+      if (meta.required_usable) old.required_usable = Number(old.required_usable||0)+Number(meta.required_usable)
+    }
     else
       cart.value.push({
         batch_id: b.id,
@@ -148,11 +157,13 @@ export const useWorkspace = defineStore('workspace', () => {
         image_url: p.image_url,
         supplier: p.supplier,
         unit: p.unit,
-        price: p.retail_price,
+        price: b.price ?? p.retail_price,
         quantity: n,
         available: b.available,
         code: b.code,
         min_order: p.min_order,
+        quantity_step: p.quantity_step,
+        ...meta,
       })
     persistCart()
     ElMessage.success('已加入采购清单')

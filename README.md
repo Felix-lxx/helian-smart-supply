@@ -1,50 +1,56 @@
-# 禾链智配 · 农产品采购与履约协同系统
+# 禾链智配 · 果蔬集采与履约调度
 
-面向合作社、集配中心、连锁门店和中央厨房的果蔬采购系统。围绕「按用途买得合适、批次异常后补得上、复检结果能影响交易」建设采购、供应和运营三个相互联动的工作区。
+面向合作社、集配中心、连锁门店和中央厨房的采购与交付协同系统。采购、供应、协作供货和运营使用同一组需求、批次、订单、任务和验收记录。
 
-**Vue 3 · Django REST Framework · MySQL · SciPy MILP · ECharts · Leaflet**
+**Vue 3 / Vite / Element Plus / Pinia / ECharts / Leaflet · Django REST Framework / MySQL · SciPy HiGHS MILP**
 
-[功能与特色](#功能与特色) · [页面预览](#页面预览) · [快速启动](#快速启动) · [演示流程](#演示流程) · [配置与边界](#配置与边界) · [项目结构](#项目结构)
+[快速启动](#快速启动) · [系统架构](docs/ARCHITECTURE.md) · [操作指南](docs/USER_GUIDE.md) · [开发约定](CONTRIBUTING.md) · [第三方说明](THIRD_PARTY_NOTICES.md)
 
-## 功能与特色
+## 主要能力
 
-| 业务能力 | 已实现的行为 | 可视化与交互 |
-| --- | --- | --- |
-| 用途采购 | 门店鲜销、厨房加工、榨汁模板；规格、交期、预算和允许协商项；按批次比较到货成本及净可用成本 | 多批次并排比较、条件差异解释、情景净得率试算、直接加入采购清单 |
-| 异常补配 | 隔离、短缺、延迟影响定位；保留未受影响承诺；改动最少、成本优先、交付优先三种方案 | 调整前后逐单比较、补配流向图、影响数量、费用差额、多方确认 |
-| 复检协同 | 分指标抽样记录、Wilson 区间、按受影响需求与不确定性排序、任务执行和人工处置 | 批次证据、区间图、受影响需求与复检任务联动 |
-| 交易闭环 | 需求 → 报价 → 核价 → 下单 → 收款核对 → 分批发运 → 验收 → 异常处理 | 服务端核价、报价偏差确认、数量与品质分开验收、状态时间线 |
-| 库存作业 | 批次可售、预留、释放、实称、损耗、拆批、发运扣减；库存流水与版本检查 | 批次作业侧栏、数量守恒、影响预览和任务看板 |
-| 运营协同 | 企业、站点、供应岗位授权、日期及演示数据筛选、完整记录聚合、到期任务 | 可下钻指标、岗位范围、提醒记录、设备与批次/任务关联 |
-| 地图与助手 | 天地图服务端代理、供给与站点图层；本地采购字段抽取；可选 DeepSeek 解读 | 地图点选与列表联动、采购草稿、用户逐次同意的外部解读 |
+| 场景 | 当前实现 |
+| --- | --- |
+| 多门店集采 | 多品项、多收货点、截单时间、CSV 草稿导入、模板复用，报价与订单关联同一采购单 |
+| 用途与净量采购 | 按批次、用途和加工方式保存称重依据，反算毛料量，比较到货成本与净可用成本 |
+| 分级与库存 | 父子批次、分级价格、实际损耗、预留与释放；分级数量守恒，子批次待复核 |
+| 实际履约 | 领取/阻塞/完成作业、二维码标签、分批发运、毛皮净称重、允差、合格与拒收 |
+| 异常补配 | 保留未受影响安排，比较少改动/低费用/早交付；采购与供货方共同确认，替代方实际发运 |
+| 对账与售后 | 实重尾差、异议补充依据、实际付款/退款凭证、独立补发验收、退货隔离入库 |
+| 品质与运营 | 分项抽检与复检任务、采购影响排序、企业及岗位范围、可下钻统计、设备观测入口 |
+| 调度地图与助手 | 日期/站点/单位联动、官方底图代理及行政区回退；本地采购字段抽取、可选外部解读 |
 
-**计算逻辑有依据，也有边界：**
-
-- 净可用成本 =（商品款 + 包装费 + 运费）÷ 净可用重量。没有称重依据时显示待核实，情景参数明确标识；不从图片目标数量推断重量损耗。
-- 分货使用混合整数规划，包含库存容量、需求、起订量、数量增量、阶梯价与费用。异常补配只重排受影响的未发运分配，方案执行前需各方确认。
-- 复检优先级采用透明规则；Wilson 区间用于说明抽样不确定性。这里使用的是已有统计及求解方法，不宣称原创算法、固定收益或食品安全认证。
+净得率依据区分整批实称、样本估算和演示参数；图像目标数量不等于重量损耗。MILP、Wilson 区间属于已有方法，项目不宣称原创统计方法或固定收益提升。
 
 ## 页面预览
 
-以下为本地演示数据截图，不代表真实库存、检测或交易。
+截图为明确标识的历史演示业务，非真实库存或交易；日期筛选与记录到货日一致。
 
-### 用途采购与净可用成本
+![工作台](docs/images/workbench-layout.png)
+![用途采购](docs/images/procurement-v3.png)
+![履约调度](docs/images/control.png)
 
-![用途采购与批次比较](docs/images/procurement.png)
+## 工程组织
 
-### 异常补配与多方确认
+| 路径 | 职责 |
+| --- | --- |
+| `code/Agricultural-product-system/` | 前端应用；`src/router` 路由、`stores` 状态、`views/workspace` 当前业务页面、`components` 共享组件 |
+| `code/system/backend_system/` | Django 环境配置及 HTTP 入口 |
+| `code/system/api/` | 业务 API、权限、规则、调度、库存、履约及结算；模块分工见架构文档 |
+| `code/system/api/migrations/` | 完整结构迁移历史；新环境从空库迁移，已有环境增量迁移 |
+| `code/system/api/management/commands/` | 三组演示初始化、独立到期任务 |
+| `scripts/` | 可复现业务检查、显式设备模拟器 |
+| `docs/` | 当前架构、操作指南与页面截图 |
+| `vendor/` | 保留来源与许可证的第三方源码 |
+| `docs/ci/github-actions.yml` | 可启用的前端构建、后端隔离业务检查 CI 模板 |
 
-![异常补配方案](docs/images/recovery.png)
+保留原有前后端路径，避免破坏现有启动、模型路径与本地环境。旧 Vue 外壳、未引用页面和重复状态模块已移除；后端仍被路由引用的兼容入口转交统一业务服务。数据库迁移和第三方许可不作为“旧文件”删除。
 
 ## 快速启动
 
-### 1. 环境要求
+### 环境与依赖
 
-- Python **3.12**，Node.js **20.19+ 或 22.12+**（以 `package.json` 的 engines 为准）。
-- 本机运行 MySQL 8.0.11+，创建专用数据库与账号，使用 `utf8mb4`；版本要求见 [Django 数据库文档](https://docs.djangoproject.com/en/5.2/ref/databases/#version-support)。
-- 交易、分货与人工质检流程不需要 DeepSeek、地图密钥或模型权重。图像推理需要另行准备可合法使用的权重和可选依赖。
-
-### 2. 克隆与安装
+- Python 3.12；Node.js 20.19+ 或 22.12+（CI 模板使用 Node 24）；MySQL 8.0.11+。
+- 交易、调度与人工质检不依赖地图密钥、外部大模型或图像权重。
 
 ```sh
 git clone https://github.com/Felix-lxx/helian-smart-supply.git
@@ -57,9 +63,9 @@ Windows PowerShell：
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item code\system\.env.example code\system\.env
-cd code\Agricultural-product-system
+Set-Location code\Agricultural-product-system
 npm ci
-cd ..\..
+Set-Location ..\..
 ```
 
 macOS / Linux：
@@ -72,148 +78,94 @@ npm ci
 cd ../..
 ```
 
-### 3. 数据库配置
+### 数据库与配置
 
-使用 MySQL 管理账号创建数据库及**仅针对该库**的应用账号。下面的密码是示例占位符，执行前必须替换：
+在本机 MySQL 创建 `utf8mb4` 空数据库及专用账号，将密码占位符替换为自己的密码：
 
 ```sql
 CREATE DATABASE agri_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'agri_app'@'127.0.0.1' IDENTIFIED BY 'REPLACE_WITH_YOUR_LOCAL_PASSWORD';
+CREATE USER 'agri_app'@'127.0.0.1' IDENTIFIED BY 'REPLACE_WITH_YOUR_PASSWORD';
 GRANT ALL PRIVILEGES ON agri_db.* TO 'agri_app'@'127.0.0.1';
 ```
 
-编辑 `code/system/.env`：
+编辑 `code/system/.env`，配置 `DB_NAME`、`DB_USER`、`DB_PASSWORD`、`DB_HOST`、`DB_PORT`。开发环境设置 `DJANGO_DEBUG=true`，可留空 `DJANGO_SECRET_KEY` 让系统生成被忽略的本地开发密钥；非开发环境必须配置独立密钥。环境变量优先于 `.env`。
 
-```dotenv
-DJANGO_DEBUG=true
-DB_NAME=agri_db
-DB_USER=agri_app
-DB_PASSWORD=REPLACE_WITH_YOUR_LOCAL_PASSWORD
-DB_HOST=127.0.0.1
-DB_PORT=3306
-```
+前端默认请求 `http://127.0.0.1:8000/api`。需要其他地址时，将前端 `.env.example` 复制为 `.env.local`，修改公开配置 `VITE_API_BASE_URL`；同域部署可设为 `/api` 并配置反向代理。`VITE_*` 会进入浏览器构建产物，不能存放密钥。
 
-开发模式下可留空 `DJANGO_SECRET_KEY`，后端会生成并保存到被忽略的 `.django-dev-secret`。非开发模式必须设置独立密钥。环境变量优先于 `.env`。
+### 启动
 
-### 4. 初始化与启动
-
-Windows 可在根目录执行：
+Windows 根目录执行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\启动系统.ps1 -SeedDemo
 ```
 
-脚本会执行迁移、补齐演示数据，并在后台启动前端、后端与到期任务。MySQL 需提前运行；日志保存在 `.run/`。日常启动省略 `-SeedDemo`，已有监听端口会保留。
+脚本执行迁移及三组演示初始化，后台启动前后端与到期任务；日志在 `.run/`。MySQL 需提前启动。日常启动省略 `-SeedDemo`，已有监听端口会保留。
 
-也可以手动启动。先激活虚拟环境：Windows PowerShell 使用 `.\.venv\Scripts\Activate.ps1`，macOS / Linux 使用 `source .venv/bin/activate`；随后在 `code/system/` 中执行：
+手动启动（先激活虚拟环境：Windows 为 `.\.venv\Scripts\Activate.ps1`，macOS/Linux 为 `source .venv/bin/activate`）：
 
 ```sh
+cd code/system
 python manage.py migrate
 python manage.py seed_workspace
 python manage.py seed_collaboration
+python manage.py seed_dispatch
 python manage.py runserver 127.0.0.1:8000 --noreload
 ```
 
-在同一后端目录另开已激活虚拟环境的终端，运行到期任务：
+另开终端，在后端目录运行：
 
 ```sh
 python manage.py workspace_jobs --interval 45
 ```
 
-在前端目录另开终端：
+另开终端，在前端目录运行：
 
 ```sh
 npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 ```
 
-打开 **<http://127.0.0.1:5173>**，后端为 <http://127.0.0.1:8000>。当前前端默认请求本机 8000 端口；远程部署时需修改 `src/utils/request.js` 并配置域名和反向代理。
+打开 [本地系统](http://127.0.0.1:5173)。后端地址为 `http://127.0.0.1:8000`。
 
-## 演示流程
+## 演示与配置边界
 
-登录页提供三种演示工作区。以下账号仅用于本地演示；生产环境不要初始化这些账号。演示数据脚本只补齐缺失记录，不重置已操作记录。
+登录页提供采购端 `demo_buyer`、供应端 `demo_supplier`、协作供货方 `demo_coop` 和运营端 `demo_admin`，本地演示密码均为 `Demo@2026`。快捷登录只在 DEBUG 模式开放；正式环境不初始化演示账号。种子命令补齐缺失记录，不刷新已操作记录的日期与结果。查看历史演示时，选择对应到货日期。
 
-| 身份 | 账号 | 密码 |
-| --- | --- | --- |
-| 采购 | `demo_buyer` | `Demo@2026` |
-| 供应 | `demo_supplier` | `Demo@2026` |
-| 运营 | `demo_admin` | `Demo@2026` |
-| 第二供应主体 | `demo_coop` | `Demo@2026` |
+| 后端配置 | 用途与缺省行为 |
+| --- | --- |
+| `TIANDITU_API_KEY` / `MAP_CLIENT_ORIGIN` | 天地图代理；未配置或不可用时显示行政区概览 |
+| `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` | 用户逐次同意后的外部解读；未配置时保留本地字段抽取与摘要 |
+| `DEVICE_INGEST_TOKEN` | 设备上报授权；未配置时拒绝未授权上报 |
+| `GEE_PROJECT` 等 | 可选遥感集成；缺失值保留不可用状态 |
 
-建议按三条业务链体验：
+所有后端字段见 [配置模板](code/system/.env.example)。地图虚线仅表示业务关系，当前未接实时车辆定位或导航。支付、退款与补款记录实际凭证及双方确认，不自动划款。设备模拟器见 `scripts/device_simulator.py`，只上报明确标识的随机 MOCK 数据。
 
-1. **用途采购**：采购端 `/procurement` 切换用途、数量和条件，比较净可用成本，加入清单并核价下单；供应端核对付款、分批发运，采购端逐次验收。
-2. **异常补配**：供应端 `/recovery` 打开演示隔离批次，计算方案并发送；采购端打开同一方案确认，参与方全部确认后更新履约批次和库存预留。发生价差时会形成独立处理单。
-3. **品质异常**：供应端 `/reviews` 创建/执行复检；采购端在订单验收中登记足量但品质不符，双方通过结构化补发、折让或退款处理单完成核对。
+可选图像推理：安装 `requirements-ai.txt`，自行准备有权使用的兼容 YOLOv5 权重至 `code/system/best.pt`。无权重或依赖时图像接口返回不可用，人工质检仍可操作；推理结果需要人工复核。生产部署还需配置 HTTPS、认证及媒体访问控制，不直接使用开发服务器。
 
-可同时使用两个浏览器或无痕窗口体验不同角色。工作区会周期同步，编辑中的质检草稿不会被刷新直接覆盖。
+## 检查与协作
 
-## 配置与边界
+[GitHub Actions 模板](docs/ci/github-actions.yml)已提供前端构建和后端隔离业务检查。当前发布凭据只有仓库写入权限，没有 `workflow` 授权，因此模板尚未写入 `.github/workflows/`，没有自动触发 CI；仓库所有者可将模板复制到该目录后启用。
 
-所有配置位于后端 `code/system/.env`，完整字段见 [`.env.example`](code/system/.env.example)。不要将凭据写进前端或 `VITE_*` 构建变量。
-
-| 配置 | 用途 | 未配置时 |
-| --- | --- | --- |
-| `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` | 可选语言模型解读 | 保留本地字段抽取与工作区摘要 |
-| `TIANDITU_API_KEY` / `MAP_CLIENT_ORIGIN` | 官方底图与标注，后端代理请求 | 可使用离线产地概览 |
-| `DEVICE_INGEST_TOKEN` | 设备上报令牌 | 拒绝未授权设备上报 |
-| `GEE_PROJECT` 等 | 可选 Earth Engine 遥感集成 | 缺失指标显示不可用 |
-| `DJANGO_DEBUG` / `DJANGO_SECRET_KEY` | 开发模式与签名密钥 | 默认关闭 DEBUG；非开发模式缺密钥拒绝启动 |
-
-- 助手默认本地处理；仅用户针对本次消息勾选同意后，才会将问题和工作区统计发送至 DeepSeek。
-- 地图坐标使用 WGS84/CGCS2000，经度在前、纬度在后；未知坐标不补造。行政区域演示点不代表真实经营地址。当前没有实时车辆定位或道路配送导航。
-- 支付、退款及补款以双方登记实际凭证并核对为准，未接支付网关，不自动划转资金。
-- 图片模型输出需人工复核，不自动放行库存。设备模拟脚本明确标注 MOCK，不代表真实硬件结果。
-- 本仓库是开发与演示项目。正式部署需关闭 DEBUG、移除演示账号、配置 HTTPS、完善认证/CSRF 策略和媒体访问控制，并进行独立部署审查。
-
-### 可选图像识别
-
-默认安装只覆盖采购、履约、分货与人工检查。需要 YOLO 图像推理时：
+根目录运行隔离业务检查（内存 SQLite，不修改 MySQL）：
 
 ```sh
-python -m pip install -r requirements-ai.txt
+python scripts/check_backend.py
 ```
 
-将**自行准备且有权使用**的兼容 YOLOv5 权重放到 `code/system/best.pt`。仓库包含原有本地 YOLOv5 源码及其许可证，不包含训练数据和权重。没有权重或依赖时，图像接口明确返回不可用，人工检查与交易流程继续工作。CUDA 环境按设备选择匹配的 PyTorch 安装方式。
+该检查覆盖从空库迁移、三组演示种子、角色数据范围、净量报价、分级守恒、实际发运验收、实重异议及退款、独立补发验收、跨供货方补配。SQLite 检查不替代 MySQL 环境验证。
 
-## 项目结构
+前端检查：
 
-| 路径 | 内容 |
-| --- | --- |
-| `code/Agricultural-product-system/` | Vue 前端，当前业务位于 `src/views/workspace/` |
-| `code/system/api/commerce.py` | 工作区、商品、需求、报价、订单、助手入口 |
-| `code/system/api/commerce_rules.py` | 适配、核价、库存与需求恢复规则 |
-| `code/system/api/decisions.py` | 分货与最小改动补配求解 |
-| `code/system/api/workflow.py` | 分批发运、验收、结构化异常处理 |
-| `code/system/api/collaboration_api.py` | 用途比较、检查、补配、企业站点 API |
-| `code/system/api/reporting.py` | 完整记录统计 |
-| `code/system/api/map_api.py` | 固定官方地图服务代理 |
-| `code/system/api/migrations/` | 数据库结构历史，从空库执行迁移 |
-| `code/system/api/management/commands/` | 演示初始化与独立到期任务 |
-| `vendor/yolov5/` | 原有第三方 YOLOv5 源码与许可证 |
-| `code/mock_x5.py` | 显式模拟的设备上报脚本 |
-| `docs/` | 研究计划、分轮交付说明与演示截图 |
-| `requirements*.txt` | 基础 / 可选图像推理依赖 |
-| `启动系统.ps1` | Windows 本地启动脚本 |
-
-旧 Vue 页面和兼容接口保留作历史兼容，当前功能以工作区路由为准；旧研究计划不等于全部已实现功能。
-
-## 验证与文档
-
-```powershell
-# 根目录：后端配置与迁移一致性
-cd code\system
-..\..\.venv\Scripts\python.exe manage.py check
-..\..\.venv\Scripts\python.exe manage.py makemigrations --check --dry-run
-
-# 前端构建
-cd ..\Agricultural-product-system
+```sh
+cd code/Agricultural-product-system
+npm ci
 npm run build
 ```
 
-已有关键业务流程及桌面/手机浏览器检查记录见[本轮交付说明](docs/系统升级交付说明_2026-11-21.md)。本次公开整理还检查了前端构建、迁移一致性，以及禁用可选 AI 依赖时的空库迁移、两组演示初始化和采购工作区接口。空库检查使用内存 SQLite，不等同于所有 MySQL 版本的完整验证。本地临时测试日志未作为可复现测试套件发布。
+配置/结构发生变化时，在后端目录执行 `python manage.py check` 和 `python manage.py makemigrations --check --dry-run`。开发分工、提交及清理约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## 发布内容与第三方说明
+## 发布与许可
 
-仓库不包含 `.env`、个人/业务媒体文件、数据库导出、模型权重、训练数据、安装包、运行日志、虚拟环境或 `node_modules`。这些文件留在本机，由 `.gitignore` 排除；数据库通过 migrations 建立，演示数据通过管理命令生成。
+`.env`、运行日志、个人/业务上传、数据库导出、权重、训练数据、安装包、虚拟环境和 `node_modules` 不进入仓库；数据库由迁移和明确标识的种子数据建立。历史实现可通过 Git 历史查看。
 
-第三方代码及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。公开仓库不表示可忽略第三方许可，尤其需要遵守 YOLOv5 的 AGPL-3.0 条款；本次整理没有为原项目整体重新授权。
+第三方来源与许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。保留 Geeker-Admin MIT、YOLOv5 AGPL-3.0 等原有许可证；本项目未重新授权第三方内容，也未为原项目整体新增许可证。
